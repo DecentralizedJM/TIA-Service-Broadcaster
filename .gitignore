@@ -4,6 +4,14 @@ signals.json
 # Config with secrets
 config.json
 
+# Database
+*.db
+subscribers.db
+
+# Environment
+.env
+.env.local
+
 # Python
 __pycache__/
 *.py[cod]
@@ -45,7 +53,3 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Environment
-.env
-.env.local

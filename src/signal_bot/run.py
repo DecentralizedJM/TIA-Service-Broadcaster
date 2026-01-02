@@ -1,12 +1,19 @@
 """
 Run Script - Main entry point for the Signal Bot.
+
+Supports two modes:
+1. Webhook mode (default) - For Railway deployment
+2. Polling mode - For local development
 """
 
 import argparse
 import logging
 import sys
+import uvicorn
 
-from .config import load_config, create_example_config, ConfigError
+from .settings import get_settings, Settings
+from .database import Database
+from .crypto import init_crypto
 from .telegram_bot import SignalBot
 
 
@@ -23,18 +30,55 @@ def setup_logging(verbose: bool = False):
     # Quiet down some noisy loggers
     logging.getLogger('httpx').setLevel(logging.WARNING)
     logging.getLogger('telegram').setLevel(logging.WARNING)
+    logging.getLogger('httpcore').setLevel(logging.WARNING)
+
+
+def print_banner():
+    """Print startup banner."""
+    print("""
+╔═══════════════════════════════════════════════════════════╗
+║       🤖 MUDREX TRADEIDEAS AUTOMATION BOT v2.0.0         ║
+║                                                           ║
+║   Centralized Telegram Signal Bot for Mudrex Futures     ║
+╚═══════════════════════════════════════════════════════════╝
+    """)
+
+
+def run_webhook_server(settings: Settings):
+    """Run the webhook server (production mode)."""
+    from .server import app
+    
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
+
+
+async def run_polling_mode(settings: Settings):
+    """Run in polling mode (development)."""
+    import asyncio
+    
+    # Initialize crypto
+    init_crypto(settings.encryption_secret)
+    
+    # Connect to database
+    database = Database(settings.database_path)
+    await database.connect()
+    
+    try:
+        # Create and run bot
+        bot = SignalBot(settings, database)
+        bot.run_polling()
+    finally:
+        await database.close()
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Mudrex Signal Bot - Auto-trade Telegram signals on Mudrex"
-    )
-    
-    parser.add_argument(
-        '-c', '--config',
-        default='config.json',
-        help='Path to config file (default: config.json)'
+        description="Mudrex TradeIdeas Bot - Auto-trade Telegram signals on Mudrex"
     )
     
     parser.add_argument(
@@ -44,9 +88,15 @@ def main():
     )
     
     parser.add_argument(
-        '--init',
+        '--polling',
         action='store_true',
-        help='Create example config.json file'
+        help='Run in polling mode (for local development)'
+    )
+    
+    parser.add_argument(
+        '--generate-secret',
+        action='store_true',
+        help='Generate a secure encryption secret'
     )
     
     args = parser.parse_args()
@@ -55,50 +105,47 @@ def main():
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
     
-    # Handle --init
-    if args.init:
-        create_example_config(args.config)
+    # Handle --generate-secret
+    if args.generate_secret:
+        from .crypto import generate_master_secret
+        secret = generate_master_secret()
+        print(f"\n🔐 Generated Encryption Secret:\n\n    {secret}\n")
+        print("Add this to your environment variables:")
+        print(f"    export ENCRYPTION_SECRET=\"{secret}\"\n")
         return
     
-    # Load config
+    # Print banner
+    print_banner()
+    
+    # Load settings
     try:
-        config = load_config(args.config)
-    except ConfigError as e:
-        logger.error(str(e))
-        logger.info("Run with --init to create an example config file")
-        sys.exit(1)
-    
-    # Print startup banner
-    print("""
-╔═══════════════════════════════════════════════════════════╗
-║           🤖 MUDREX SIGNAL BOT v1.0.0                    ║
-║                                                           ║
-║   Auto-trade Telegram signals on Mudrex Futures          ║
-╚═══════════════════════════════════════════════════════════╝
-    """)
-    
-    logger.info(f"Trade Amount: {config.trade_amount_usdt} USDT")
-    logger.info(f"Max Leverage: {config.max_leverage}x")
-    logger.info(f"Signal Channel: {config.signal_channel_id}")
-    
-    # Create and run the bot
-    bot = SignalBot(
-        telegram_token=config.telegram_bot_token,
-        signal_channel_id=config.signal_channel_id,
-        api_key=config.api_key,
-        api_secret=config.api_secret,
-        trade_amount_usdt=config.trade_amount_usdt,
-        max_leverage=config.max_leverage,
-        data_file=config.data_file,
-    )
-    
-    try:
-        bot.run()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        settings = get_settings()
     except Exception as e:
-        logger.exception(f"Bot crashed: {e}")
+        logger.error(f"Configuration error: {e}")
+        print("\n❌ Missing required environment variables:")
+        print("    TELEGRAM_BOT_TOKEN")
+        print("    ENCRYPTION_SECRET")
+        print("    ADMIN_TELEGRAM_ID")
+        print("    SIGNAL_CHANNEL_ID")
+        print("\nRun with --generate-secret to create an encryption secret.")
         sys.exit(1)
+    
+    logger.info(f"Admin Telegram ID: {settings.admin_telegram_id}")
+    logger.info(f"Signal Channel ID: {settings.signal_channel_id}")
+    logger.info(f"Default Trade Amount: {settings.default_trade_amount} USDT")
+    
+    if args.polling:
+        # Run in polling mode
+        logger.info("Starting in POLLING mode (for development)...")
+        import asyncio
+        asyncio.run(run_polling_mode(settings))
+    else:
+        # Run webhook server
+        logger.info("Starting in WEBHOOK mode (for production)...")
+        logger.info(f"Server: {settings.host}:{settings.port}")
+        if settings.webhook_url:
+            logger.info(f"Webhook URL: {settings.full_webhook_url}")
+        run_webhook_server(settings)
 
 
 if __name__ == '__main__':

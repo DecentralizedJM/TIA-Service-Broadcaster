@@ -1,5 +1,5 @@
 """
-Mudrex Signal Bot - Telegram Signal Auto-Trader
+Mudrex TradeIdeas Automation Bot - Centralized Telegram Signal Auto-Trader
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

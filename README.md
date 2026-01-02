@@ -1,211 +1,273 @@
-# Mudrex Signal Bot 🤖
+# Mudrex TradeIdeas Automation Bot 🤖
 
-**Auto-trade Telegram signals on Mudrex Futures**
+**Centralized Telegram Signal Bot for Mudrex Futures Trading**
 
-Receive trading signals in your Telegram channel and automatically execute them on Mudrex.
+You post signals → All subscribers get auto-trades on their Mudrex accounts.
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 YOUR RAILWAY SERVER                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   You post signal  ───►  Bot receives via webhook            │
+│   /signal LONG XRPUSDT...                                   │
+│                                │                             │
+│                                ▼                             │
+│                    ┌─────────────────────────┐               │
+│                    │   Encrypted Database    │               │
+│                    │   - Subscriber APIs     │               │
+│                    │   - Trade settings      │               │
+│                    └─────────────────────────┘               │
+│                                │                             │
+│                    For each subscriber:                      │
+│                    ├─► Execute on their Mudrex               │
+│                    └─► Notify via Telegram DM                │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Features
 
-- ✅ **Market & Limit Orders** - Support for both order types
-- ✅ **Stop Loss & Take Profit** - Automatic SL/TP placement
-- ✅ **Leverage Control** - Set leverage per signal (with max limit)
-- ✅ **Balance Check** - Skips trades if insufficient balance
-- ✅ **Signal Tracking** - Update and close signals by ID
-- ✅ **Persistence** - Signals saved to disk, survives restarts
+### For You (Admin)
+- ✅ **Post signals** in your channel with simple commands
+- ✅ **Auto-broadcast** to all subscribers instantly
+- ✅ **Track stats** - see how many subscribers, trades executed
+- ✅ **Railway hosted** - always online, no local setup
 
-## Quick Start
-
-### 1. Install
-
-```bash
-# Clone the repo
-git clone https://github.com/DecentralizedJM/mudrex-signal-bot.git
-cd mudrex-signal-bot
-
-# Install dependencies
-pip install -e .
-```
-
-### 2. Get Your Credentials
-
-**Mudrex API:**
-1. Log into [Mudrex](https://mudrex.com)
-2. Go to Settings → API Keys
-3. Create a new API key with trading permissions
-4. Save your API Key and Secret
-
-**Telegram Bot:**
-1. Message [@BotFather](https://t.me/botfather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Save the bot token you receive
-
-**Signal Channel ID:**
-1. Add your bot to your signal channel/group
-2. Make the bot an admin
-3. Forward a message from the channel to [@userinfobot](https://t.me/userinfobot) to get the channel ID (it's a negative number like `-1001234567890`)
-
-### 3. Configure
-
-```bash
-# Create config file
-python -m signal_bot.run --init
-
-# Edit config.json with your credentials
-```
-
-Or use environment variables:
-
-```bash
-export MUDREX_API_KEY="your_api_key"
-export MUDREX_API_SECRET="your_api_secret"
-export TELEGRAM_BOT_TOKEN="your_bot_token"
-export SIGNAL_CHANNEL_ID="-1001234567890"
-export TRADE_AMOUNT_USDT="50"
-export MAX_LEVERAGE="20"
-```
-
-### 4. Run
-
-```bash
-python -m signal_bot.run
-```
-
-Or with verbose logging:
-
-```bash
-python -m signal_bot.run -v
-```
+### For Subscribers
+- ✅ **Simple registration** - just DM the bot
+- ✅ **Set trade amount** - each user controls their own size
+- ✅ **Set max leverage** - cap their own risk
+- ✅ **Get notifications** - know when trades execute
+- ✅ **Encrypted API keys** - AES-128 encryption at rest
 
 ## Signal Commands
 
-### New Signal
+Post these in your signal channel:
 
-```
+```bash
+# New signal - Limit order
 /signal LONG BTCUSDT entry=50000 sl=49000 tp=52000 lev=10x
+
+# New signal - Market order
 /signal SHORT ETHUSDT market sl=3800 tp=3500 lev=5x
-```
 
-**Parameters:**
-- `LONG` or `SHORT` - Direction
-- `BTCUSDT` - Symbol (use Mudrex symbol format)
-- `entry=50000` - Entry price (omit or use `market` for market order)
-- `sl=49000` - Stop loss price (required)
-- `tp=52000` - Take profit price (required)
-- `lev=10x` - Leverage (optional, default: 1x)
-
-### Update Signal
-
-```
-/update SIG-20260103-001 sl=49500 tp=52500
-```
-
-Updates the stop loss and/or take profit for an active signal.
-
-### Close Signal
-
-```
+# Close signal
 /close SIG-20260103-001
 ```
 
-Closes the position for the given signal ID.
+## User Commands
 
-### Partial Close
+Subscribers DM your bot:
 
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message |
+| `/register` | Connect Mudrex account |
+| `/status` | View settings & stats |
+| `/setamount 100` | Set trade size to 100 USDT |
+| `/setleverage 10` | Set max leverage to 10x |
+| `/unregister` | Stop receiving signals |
+
+## Admin Commands
+
+Only you can use these:
+
+| Command | Description |
+|---------|-------------|
+| `/adminstats` | View subscriber count, trades |
+
+---
+
+## Deployment on Railway
+
+### 1. Create Telegram Bot
+
+1. Message [@BotFather](https://t.me/botfather)
+2. Send `/newbot` and follow prompts
+3. Save the bot token
+
+### 2. Get Your IDs
+
+1. Message [@userinfobot](https://t.me/userinfobot) to get your Telegram ID
+2. Create your signal channel/group
+3. Add your bot as admin
+4. Get channel ID (forward a message from channel to @userinfobot)
+
+### 3. Deploy to Railway
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template)
+
+Or manually:
+
+```bash
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Login
+railway login
+
+# Create project
+railway init
+
+# Link to repo
+railway link
+
+# Set environment variables
+railway variables set TELEGRAM_BOT_TOKEN="your_token"
+railway variables set ADMIN_TELEGRAM_ID="your_id"
+railway variables set SIGNAL_CHANNEL_ID="-100xxxxxxxx"
+railway variables set ENCRYPTION_SECRET="$(openssl rand -hex 16)"
+
+# Deploy
+railway up
 ```
-/partial SIG-20260103-001 50%
+
+### 4. Set Webhook URL
+
+After deployment, Railway gives you a URL like `https://your-app.up.railway.app`
+
+Set it:
+```bash
+railway variables set WEBHOOK_URL="https://your-app.up.railway.app"
 ```
 
-Closes 50% of the position.
+The bot will automatically register the webhook on startup.
 
-## Bot Commands
+---
 
-When you DM the bot directly:
+## Local Development
 
-- `/start` - Show help message
-- `/status` - Show active signals
-- `/stats` - Show trading statistics
-- `/balance` - Check wallet balance
+### 1. Clone & Install
 
-## Configuration Options
+```bash
+git clone https://github.com/DecentralizedJM/mudrex-tradeideas-automation-bot.git
+cd mudrex-tradeideas-automation-bot
+pip install -e .
+```
 
-| Option | Env Variable | Default | Description |
-|--------|-------------|---------|-------------|
-| `api_key` | `MUDREX_API_KEY` | - | Mudrex API key |
-| `api_secret` | `MUDREX_API_SECRET` | - | Mudrex API secret |
-| `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | - | Telegram bot token |
-| `signal_channel_id` | `SIGNAL_CHANNEL_ID` | - | Channel ID to monitor |
-| `trade_amount_usdt` | `TRADE_AMOUNT_USDT` | 50.0 | USDT per trade |
-| `max_leverage` | `MAX_LEVERAGE` | 20 | Maximum allowed leverage |
-| `data_file` | `DATA_FILE` | signals.json | Signal persistence file |
+### 2. Generate Encryption Secret
 
-## Example Workflow
+```bash
+python -m signal_bot.run --generate-secret
+```
 
-1. **You post a signal in your Telegram channel:**
-   ```
-   /signal LONG XRPUSDT entry=2.50 sl=2.30 tp=3.00 lev=5x
-   ```
+### 3. Set Environment Variables
 
-2. **Bot responds:**
-   ```
-   📊 Signal Received
-   ━━━━━━━━━━━━━━━━━━━━
-   🆔 ID: SIG-20260103-001
-   📈 LONG XRPUSDT
-   📋 Order: LIMIT @ 2.50
-   🛑 Stop Loss: 2.30
-   🎯 Take Profit: 3.00
-   ⚡ Leverage: 5x
-   ━━━━━━━━━━━━━━━━━━━━
-   
-   ✅ Trade Execution
-   ━━━━━━━━━━━━━━━━━━━━
-   🆔 Signal: SIG-20260103-001
-   📊 Status: SUCCESS
-   💬 Order placed: BUY XRPUSDT @ LIMIT
-   ━━━━━━━━━━━━━━━━━━━━
-   ```
+```bash
+cp .env.example .env
+# Edit .env with your values
+```
 
-3. **Later, update SL:**
-   ```
-   /update SIG-20260103-001 sl=2.45
-   ```
+### 4. Run in Polling Mode
 
-4. **Close the position:**
-   ```
-   /close SIG-20260103-001
-   ```
+```bash
+python -m signal_bot.run --polling
+```
 
-## Error Handling
+---
 
-- **Insufficient Balance**: Bot skips the trade and notifies you
-- **Invalid Symbol**: Bot rejects the signal with error message
-- **Leverage Limit**: Bot caps leverage at your configured maximum
-- **Parse Errors**: Bot explains what's wrong with the signal format
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather |
+| `ADMIN_TELEGRAM_ID` | ✅ | Your Telegram user ID |
+| `SIGNAL_CHANNEL_ID` | ✅ | Channel ID where you post signals |
+| `ENCRYPTION_SECRET` | ✅ | 32-char secret for API key encryption |
+| `WEBHOOK_URL` | Production | Your Railway URL |
+| `DATABASE_PATH` | No | SQLite path (default: subscribers.db) |
+| `DEFAULT_TRADE_AMOUNT` | No | Default USDT per trade (default: 50) |
+| `DEFAULT_MAX_LEVERAGE` | No | Default max leverage (default: 10) |
+
+---
+
+## Security
+
+### API Key Encryption
+
+All subscriber API keys are encrypted using:
+- **Fernet** (AES-128-CBC with HMAC)
+- **PBKDF2** key derivation (480,000 iterations)
+- Keys only decrypted in memory when executing trades
+
+### Best Practices
+
+1. **Never share your ENCRYPTION_SECRET** - if compromised, rotate it and have users re-register
+2. **Use Railway's encrypted variables** - they're not exposed in logs
+3. **Bot deletes messages** containing API keys immediately after reading
+
+---
 
 ## Project Structure
 
 ```
-mudrex-signal-bot/
+mudrex-tradeideas-automation-bot/
+├── Dockerfile
+├── Procfile
+├── railway.toml
 ├── pyproject.toml
-├── config.example.json
 ├── README.md
+├── .env.example
 └── src/
     └── signal_bot/
         ├── __init__.py
-        ├── config.py          # Configuration loading
-        ├── run.py             # Main entry point
-        ├── signal_parser.py   # Parse signal commands
-        ├── trade_executor.py  # Execute trades on Mudrex
-        ├── position_tracker.py # Track signals & positions
-        └── telegram_bot.py    # Telegram bot handler
+        ├── run.py              # Entry point
+        ├── server.py           # FastAPI webhook server
+        ├── settings.py         # Pydantic settings
+        ├── telegram_bot.py     # Bot handlers
+        ├── signal_parser.py    # Parse /signal commands
+        ├── broadcaster.py      # Execute for all subscribers
+        ├── database.py         # SQLite + encrypted storage
+        └── crypto.py           # Fernet encryption
 ```
 
-## Requirements
+---
 
-- Python 3.8+
-- Mudrex account with API access
-- Telegram bot token
-- The improved Mudrex SDK (v1.1.0+)
+## Example Workflow
+
+### 1. Subscriber Registers
+
+```
+User: /register
+Bot: 🔐 Please send your Mudrex API Key...
+User: abc123...
+Bot: ✅ Now send your API Secret...
+User: xyz789...
+Bot: 💰 How much USDT per trade?
+User: 100
+Bot: 🎉 Registration Complete! Trade Amount: 100 USDT
+```
+
+### 2. You Post Signal
+
+```
+You (in signal channel):
+/signal LONG XRPUSDT entry=2.50 sl=2.30 tp=3.00 lev=5x
+
+Bot replies to you:
+📡 Signal Broadcast Complete
+✅ Success: 47
+💰 Insufficient Balance: 3
+❌ Failed: 0
+Total: 50 subscribers
+```
+
+### 3. Subscribers Get DM
+
+```
+Bot DMs each subscriber:
+✅ Trade Executed
+📊 LONG XRPUSDT
+📋 LIMIT @ 2.50
+🛑 SL: 2.30
+🎯 TP: 3.00
+⚡ Leverage: 5x
+```
+
+---
 
 ## License
 
@@ -213,4 +275,4 @@ MIT License
 
 ## Disclaimer
 
-⚠️ **Trading cryptocurrency futures involves significant risk of loss. This bot executes trades automatically based on signals. Use at your own risk. The developers are not responsible for any financial losses.**
+⚠️ **Trading cryptocurrency futures involves significant risk. This bot executes trades automatically based on signals. Users are responsible for their own trading decisions and API key security. The developers are not responsible for any financial losses.**
