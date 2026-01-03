@@ -32,7 +32,7 @@ dependencies = [
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "mudrex-api-trading-python-sdk>=1.1.0",
+    "mudrex-api-trading-python-sdk>=1.2.0",
 ]
 
 [project.optional-dependencies]

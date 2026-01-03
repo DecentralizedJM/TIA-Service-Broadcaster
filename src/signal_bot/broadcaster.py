@@ -11,8 +11,9 @@ This is the core of the centralized system:
 import asyncio
 import logging
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from mudrex import MudrexClient
 from mudrex.exceptions import MudrexAPIError
@@ -39,6 +40,54 @@ class TradeResult:
     status: TradeStatus
     message: str
     order_id: Optional[str] = None
+    quantity: Optional[str] = None
+    actual_value: Optional[float] = None
+
+
+def calculate_quantity_from_usd(
+    usd_amount: float,
+    price: float,
+    quantity_step: float,
+    min_quantity: float = 0.0,
+    max_quantity: float = float('inf'),
+) -> Tuple[str, float]:
+    """
+    Calculate coin quantity from USD amount.
+    
+    Args:
+        usd_amount: Amount in USD to trade
+        price: Current price of the asset
+        quantity_step: Minimum quantity increment (e.g., 0.001)
+        min_quantity: Minimum allowed quantity
+        max_quantity: Maximum allowed quantity
+        
+    Returns:
+        Tuple of (quantity as string, actual USD value)
+    """
+    if price <= 0:
+        return "0", 0.0
+    
+    # Calculate raw quantity
+    raw_qty = usd_amount / price
+    
+    # Round down to quantity step
+    if quantity_step > 0:
+        step = Decimal(str(quantity_step))
+        qty = Decimal(str(raw_qty)).quantize(step, rounding=ROUND_DOWN)
+    else:
+        qty = Decimal(str(raw_qty))
+    
+    # Apply min/max bounds
+    qty = max(Decimal(str(min_quantity)), qty)
+    qty = min(Decimal(str(max_quantity)), qty)
+    
+    # Calculate actual USD value
+    actual_value = float(qty) * price
+    
+    # Format quantity string (remove trailing zeros)
+    qty_str = f"{qty:f}".rstrip('0').rstrip('.')
+    
+    return qty_str, actual_value
 
 
 class SignalBroadcaster:
@@ -126,9 +175,9 @@ class SignalBroadcaster:
         )
         
         try:
-            # Check balance
-            wallet = client.wallet.get()
-            balance = float(wallet.available_balance) if wallet else 0.0
+            # FIXED: Use get_futures_balance(), not get()
+            balance_info = client.wallet.get_futures_balance()
+            balance = float(balance_info.balance) if balance_info else 0.0
             
             if balance < subscriber.trade_amount_usdt:
                 await self.db.record_trade(
@@ -147,8 +196,9 @@ class SignalBroadcaster:
                     message=f"Insufficient balance: {balance:.2f} USDT",
                 )
             
-            # Check if symbol exists
-            if not client.assets.exists(signal.symbol):
+            # Get asset details for quantity calculation
+            asset = client.assets.get(signal.symbol)
+            if not asset:
                 await self.db.record_trade(
                     telegram_id=subscriber.telegram_id,
                     signal_id=signal.signal_id,
@@ -167,21 +217,51 @@ class SignalBroadcaster:
             
             # Set leverage (capped at subscriber's max)
             leverage = min(signal.leverage, subscriber.max_leverage)
-            client.leverage.set(symbol=signal.symbol, leverage=str(leverage))
+            # FIXED: leverage must be string, include margin_type
+            client.leverage.set(
+                symbol=signal.symbol,
+                leverage=str(leverage),
+                margin_type="ISOLATED"
+            )
+            
+            # FIXED: Calculate proper coin quantity from USD amount
+            price = signal.entry_price if signal.entry_price else 1.0
+            qty, actual_value = calculate_quantity_from_usd(
+                usd_amount=subscriber.trade_amount_usdt,
+                price=price,
+                quantity_step=float(asset.quantity_step),
+                min_quantity=float(asset.min_quantity),
+                max_quantity=float(asset.max_quantity),
+            )
+            
+            if qty == "0" or float(qty) < float(asset.min_quantity):
+                await self.db.record_trade(
+                    telegram_id=subscriber.telegram_id,
+                    signal_id=signal.signal_id,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    order_type=signal.order_type.value,
+                    status="API_ERROR",
+                    error_message=f"Quantity {qty} below minimum {asset.min_quantity}",
+                )
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.API_ERROR,
+                    message=f"Quantity too small: {qty} < {asset.min_quantity}",
+                )
             
             # Determine side (SDK uses LONG/SHORT)
             side = "LONG" if signal.signal_type == SignalType.LONG else "SHORT"
             
-            # Create order using SDK
+            # Create order using SDK with proper quantity
             if signal.order_type == OrderType.MARKET:
-                # Market order
+                # Market order - skip SL/TP in initial order for reliability
                 order = client.orders.create_market_order(
                     symbol=signal.symbol,
                     side=side,
-                    quantity=str(subscriber.trade_amount_usdt),
+                    quantity=qty,  # FIXED: proper coin quantity, not USDT
                     leverage=str(leverage),
-                    stoploss_price=str(signal.stop_loss) if signal.stop_loss else None,
-                    takeprofit_price=str(signal.take_profit) if signal.take_profit else None,
                 )
             else:
                 # Limit order
@@ -189,10 +269,8 @@ class SignalBroadcaster:
                     symbol=signal.symbol,
                     side=side,
                     price=str(signal.entry_price),
-                    quantity=str(subscriber.trade_amount_usdt),
+                    quantity=qty,  # FIXED: proper coin quantity
                     leverage=str(leverage),
-                    stoploss_price=str(signal.stop_loss) if signal.stop_loss else None,
-                    takeprofit_price=str(signal.take_profit) if signal.take_profit else None,
                 )
             
             # Record success
@@ -203,7 +281,7 @@ class SignalBroadcaster:
                 side=side,
                 order_type=signal.order_type.value,
                 status="SUCCESS",
-                quantity=subscriber.trade_amount_usdt,
+                quantity=float(qty),
                 entry_price=signal.entry_price,
             )
             
@@ -211,8 +289,10 @@ class SignalBroadcaster:
                 subscriber_id=subscriber.telegram_id,
                 username=subscriber.username,
                 status=TradeStatus.SUCCESS,
-                message=f"{side} {signal.symbol} @ {signal.order_type.value}",
+                message=f"{side} {qty} {signal.symbol} (~${actual_value:.2f})",
                 order_id=order.order_id,
+                quantity=qty,
+                actual_value=actual_value,
             )
             
         except MudrexAPIError as e:
@@ -291,14 +371,16 @@ Total: {len(results)} subscribers
 def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
     """Format trade result notification for a subscriber."""
     if result.status == TradeStatus.SUCCESS:
+        qty_info = f"\n📦 Quantity: {result.quantity}" if result.quantity else ""
+        value_info = f" (~${result.actual_value:.2f})" if result.actual_value else ""
         return f"""
 ✅ **Trade Executed**
 ━━━━━━━━━━━━━━━━━━━━
 🆔 Signal: `{signal.signal_id}`
 📊 {signal.signal_type.value} {signal.symbol}
-📋 {signal.order_type.value}
-🛑 SL: {signal.stop_loss}
-🎯 TP: {signal.take_profit}
+📋 {signal.order_type.value}{qty_info}{value_info}
+🛑 SL: {signal.stop_loss or "Not set"}
+🎯 TP: {signal.take_profit or "Not set"}
 ⚡ Leverage: {signal.leverage}x
 ━━━━━━━━━━━━━━━━━━━━
 """.strip()

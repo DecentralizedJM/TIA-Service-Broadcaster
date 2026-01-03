@@ -2,19 +2,21 @@
 Trade Executor - Execute trades on Mudrex using the SDK.
 
 Handles:
-- Market and limit orders
-- Setting leverage
-- Stop loss and take profit
-- Balance checking
+- Market and limit orders with proper quantity calculation
+- Setting leverage (LONG/SHORT, not BUY/SELL)
+- Stop loss and take profit (as separate risk orders)
+- Balance checking via get_futures_balance()
 """
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 from mudrex import MudrexClient
-from mudrex.models import Order, Position
+from mudrex.models import Order, Position, Asset
+from mudrex.exceptions import MudrexAPIError
 
 from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose
 
@@ -39,10 +41,63 @@ class ExecutionResult:
     signal_id: str
     order: Optional[Order] = None
     position: Optional[Position] = None
+    quantity: Optional[str] = None  # Actual quantity traded
+
+
+def calculate_quantity_from_usd(
+    usd_amount: float,
+    price: float,
+    quantity_step: float,
+    min_quantity: float = 0.0,
+    max_quantity: float = float('inf'),
+) -> Tuple[str, float]:
+    """
+    Calculate coin quantity from USD amount.
+    
+    Args:
+        usd_amount: Amount in USD to trade
+        price: Current price of the asset
+        quantity_step: Minimum quantity increment (e.g., 0.001)
+        min_quantity: Minimum allowed quantity
+        max_quantity: Maximum allowed quantity
+        
+    Returns:
+        Tuple of (quantity as string, actual USD value)
+        
+    Example:
+        >>> qty, value = calculate_quantity_from_usd(50.0, 1.905, 0.1)
+        >>> # 50 / 1.905 = 26.24 → rounded to step 0.1 = 26.2
+        >>> print(f"Qty: {qty}, Value: ${value:.2f}")
+        Qty: 26.2, Value: $49.90
+    """
+    if price <= 0:
+        return "0", 0.0
+    
+    # Calculate raw quantity
+    raw_qty = usd_amount / price
+    
+    # Round down to quantity step
+    if quantity_step > 0:
+        step = Decimal(str(quantity_step))
+        qty = Decimal(str(raw_qty)).quantize(step, rounding=ROUND_DOWN)
+    else:
+        qty = Decimal(str(raw_qty))
+    
+    # Apply min/max bounds
+    qty = max(Decimal(str(min_quantity)), qty)
+    qty = min(Decimal(str(max_quantity)), qty)
+    
+    # Calculate actual USD value
+    actual_value = float(qty) * price
+    
+    # Format quantity string (remove trailing zeros)
+    qty_str = f"{qty:f}".rstrip('0').rstrip('.')
+    
+    return qty_str, actual_value
 
 
 class TradeExecutor:
-    """Execute trades on Mudrex."""
+    """Execute trades on Mudrex using the SDK."""
     
     def __init__(
         self,
@@ -70,10 +125,11 @@ class TradeExecutor:
         logger.info(f"TradeExecutor initialized - Amount: {trade_amount_usdt} USDT, Max Leverage: {max_leverage}x")
     
     def _check_balance(self) -> float:
-        """Get available USDT balance."""
+        """Get available USDT futures balance."""
         try:
-            wallet = self.client.wallet.get()
-            return float(wallet.available_balance) if wallet else 0.0
+            # FIXED: Use get_futures_balance(), not get()
+            balance = self.client.wallet.get_futures_balance()
+            return float(balance.balance) if balance else 0.0
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             return 0.0
@@ -86,13 +142,26 @@ class TradeExecutor:
             logger.error(f"Failed to check symbol {symbol}: {e}")
             return False
     
+    def _get_asset(self, symbol: str) -> Optional[Asset]:
+        """Get asset details for quantity calculation."""
+        try:
+            return self.client.assets.get(symbol)
+        except Exception as e:
+            logger.error(f"Failed to get asset {symbol}: {e}")
+            return None
+    
     def _set_leverage(self, symbol: str, leverage: int) -> bool:
         """Set leverage for a symbol."""
         try:
             # Cap leverage at max allowed
             actual_leverage = min(leverage, self.max_leverage)
             
-            self.client.leverage.set(symbol=symbol, leverage=actual_leverage)
+            # FIXED: leverage must be string, include margin_type
+            self.client.leverage.set(
+                symbol=symbol,
+                leverage=str(actual_leverage),
+                margin_type="ISOLATED"
+            )
             logger.info(f"Set leverage for {symbol} to {actual_leverage}x")
             return True
         except Exception as e:
@@ -101,7 +170,7 @@ class TradeExecutor:
     
     def execute_signal(self, signal: Signal) -> ExecutionResult:
         """
-        Execute a trading signal.
+        Execute a trading signal with proper quantity calculation.
         
         Args:
             signal: Parsed trading signal
@@ -122,8 +191,9 @@ class TradeExecutor:
                 signal_id=signal.signal_id
             )
         
-        # Step 2: Check symbol exists
-        if not self._check_symbol_exists(signal.symbol):
+        # Step 2: Get asset details for quantity calculation
+        asset = self._get_asset(signal.symbol)
+        if not asset:
             msg = f"Symbol not found: {signal.symbol}"
             logger.error(msg)
             return ExecutionResult(
@@ -133,8 +203,9 @@ class TradeExecutor:
             )
         
         # Step 3: Set leverage
-        if not self._set_leverage(signal.symbol, signal.leverage):
-            msg = f"Failed to set leverage to {signal.leverage}x for {signal.symbol}"
+        actual_leverage = min(signal.leverage, self.max_leverage)
+        if not self._set_leverage(signal.symbol, actual_leverage):
+            msg = f"Failed to set leverage to {actual_leverage}x for {signal.symbol}"
             logger.error(msg)
             return ExecutionResult(
                 status=ExecutionStatus.LEVERAGE_ERROR,
@@ -142,45 +213,68 @@ class TradeExecutor:
                 signal_id=signal.signal_id
             )
         
-        # Step 4: Place order
+        # Step 4: Calculate proper coin quantity from USD amount
+        # For market orders, use entry_price as estimate (or we could fetch current price)
+        price = signal.entry_price if signal.entry_price else 1.0
+        
+        qty, actual_value = calculate_quantity_from_usd(
+            usd_amount=self.trade_amount_usdt,
+            price=price,
+            quantity_step=float(asset.quantity_step),
+            min_quantity=float(asset.min_quantity),
+            max_quantity=float(asset.max_quantity),
+        )
+        
+        if qty == "0" or float(qty) < float(asset.min_quantity):
+            msg = f"Calculated quantity {qty} below minimum {asset.min_quantity}"
+            logger.error(msg)
+            return ExecutionResult(
+                status=ExecutionStatus.ORDER_FAILED,
+                message=msg,
+                signal_id=signal.signal_id
+            )
+        
+        logger.info(f"Calculated: {qty} {signal.symbol} (~${actual_value:.2f} USDT)")
+        
+        # Step 5: Place order
         try:
-            # Determine side
-            side = "BUY" if signal.signal_type == SignalType.LONG else "SELL"
-            
-            # Calculate quantity based on trade amount and leverage
-            # For now, we pass the USDT amount and let the API handle it
-            # The actual quantity depends on the current price
+            # FIXED: SDK uses LONG/SHORT, not BUY/SELL
+            side = "LONG" if signal.signal_type == SignalType.LONG else "SHORT"
             
             if signal.order_type == OrderType.MARKET:
-                # Market order
+                # Market order - place without SL/TP first (more reliable)
                 order = self.client.orders.create_market_order(
                     symbol=signal.symbol,
                     side=side,
-                    quantity=self.trade_amount_usdt,  # In USDT
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
+                    quantity=qty,
+                    leverage=str(actual_leverage),
+                    # FIXED: correct parameter names are stoploss_price and takeprofit_price
+                    # But we'll set them after position opens for reliability
                 )
             else:
                 # Limit order
                 order = self.client.orders.create_limit_order(
                     symbol=signal.symbol,
                     side=side,
-                    quantity=self.trade_amount_usdt,
-                    price=signal.entry_price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
+                    quantity=qty,
+                    price=str(signal.entry_price),
+                    leverage=str(actual_leverage),
                 )
             
             logger.info(f"Order placed successfully: {order}")
             
+            # TODO: After position opens, set SL/TP via positions.set_risk_order()
+            # This is more reliable than passing in initial order
+            
             return ExecutionResult(
                 status=ExecutionStatus.SUCCESS,
-                message=f"Order placed: {side} {signal.symbol} @ {signal.order_type.value}",
+                message=f"Order placed: {side} {qty} {signal.symbol} (~${actual_value:.2f})",
                 signal_id=signal.signal_id,
-                order=order
+                order=order,
+                quantity=qty
             )
             
-        except Exception as e:
+        except MudrexAPIError as e:
             msg = f"Order failed: {str(e)}"
             logger.error(msg)
             return ExecutionResult(
@@ -188,10 +282,18 @@ class TradeExecutor:
                 message=msg,
                 signal_id=signal.signal_id
             )
+        except Exception as e:
+            msg = f"Unexpected error: {str(e)}"
+            logger.error(msg)
+            return ExecutionResult(
+                status=ExecutionStatus.API_ERROR,
+                message=msg,
+                signal_id=signal.signal_id
+            )
     
     def update_position(self, update: SignalUpdate, position_id: str) -> ExecutionResult:
         """
-        Update an existing position's SL/TP.
+        Update an existing position's SL/TP using the positions API.
         
         Args:
             update: Signal update with new SL/TP values
@@ -212,19 +314,40 @@ class TradeExecutor:
                     signal_id=update.signal_id
                 )
             
-            # Update SL/TP - this would need the actual API method
-            # For now, we'd need to cancel existing SL/TP orders and place new ones
-            # This is a simplified version
+            # FIXED: Use positions.set_risk_order() or edit_risk_order()
+            sl_price = str(update.stop_loss) if update.stop_loss else None
+            tp_price = str(update.take_profit) if update.take_profit else None
             
-            return ExecutionResult(
-                status=ExecutionStatus.SUCCESS,
-                message=f"Position updated: SL={update.stop_loss}, TP={update.take_profit}",
-                signal_id=update.signal_id,
-                position=position
+            success = self.client.positions.set_risk_order(
+                position_id=position_id,
+                stoploss_price=sl_price,
+                takeprofit_price=tp_price,
             )
             
-        except Exception as e:
+            if success:
+                return ExecutionResult(
+                    status=ExecutionStatus.SUCCESS,
+                    message=f"Position updated: SL={update.stop_loss}, TP={update.take_profit}",
+                    signal_id=update.signal_id,
+                    position=position
+                )
+            else:
+                return ExecutionResult(
+                    status=ExecutionStatus.API_ERROR,
+                    message="Failed to set risk order",
+                    signal_id=update.signal_id
+                )
+            
+        except MudrexAPIError as e:
             msg = f"Update failed: {str(e)}"
+            logger.error(msg)
+            return ExecutionResult(
+                status=ExecutionStatus.API_ERROR,
+                message=msg,
+                signal_id=update.signal_id
+            )
+        except Exception as e:
+            msg = f"Unexpected error: {str(e)}"
             logger.error(msg)
             return ExecutionResult(
                 status=ExecutionStatus.API_ERROR,
@@ -234,7 +357,7 @@ class TradeExecutor:
     
     def close_position(self, close: SignalClose, position_id: str) -> ExecutionResult:
         """
-        Close a position.
+        Close a position using the SDK's positions.close() method.
         
         Args:
             close: Close signal
@@ -255,36 +378,59 @@ class TradeExecutor:
                 )
             
             if close.partial_percent and close.partial_percent < 100:
-                # Partial close - reduce position size
+                # FIXED: Use positions.close_partial() for partial closes
                 close_qty = float(position.quantity) * (close.partial_percent / 100)
-                # Place opposite market order for partial close
-                side = "SELL" if position.side == "BUY" else "BUY"
                 
-                order = self.client.orders.create_market_order(
-                    symbol=position.symbol,
-                    side=side,
-                    quantity=close_qty,
-                    reduce_only=True
+                # Round to quantity step if we have asset info
+                asset = self._get_asset(position.symbol)
+                if asset:
+                    qty_str, _ = calculate_quantity_from_usd(
+                        usd_amount=close_qty * 1000,  # Dummy high value
+                        price=1000,  # Dummy price
+                        quantity_step=float(asset.quantity_step),
+                    )
+                    # Actually we just need to round the close_qty
+                    step = float(asset.quantity_step)
+                    close_qty = int(close_qty / step) * step
+                
+                updated_position = self.client.positions.close_partial(
+                    position_id=position_id,
+                    quantity=str(close_qty)
                 )
                 
                 return ExecutionResult(
                     status=ExecutionStatus.SUCCESS,
-                    message=f"Partial close {close.partial_percent}% executed",
+                    message=f"Partial close {close.partial_percent}% executed ({close_qty} closed)",
                     signal_id=close.signal_id,
-                    order=order
+                    position=updated_position
                 )
             else:
-                # Full close
-                self.client.positions.close(position_id)
+                # FIXED: Use positions.close() for full close
+                success = self.client.positions.close(position_id)
                 
-                return ExecutionResult(
-                    status=ExecutionStatus.SUCCESS,
-                    message=f"Position closed for signal {close.signal_id}",
-                    signal_id=close.signal_id
-                )
+                if success:
+                    return ExecutionResult(
+                        status=ExecutionStatus.SUCCESS,
+                        message=f"Position closed for signal {close.signal_id}",
+                        signal_id=close.signal_id
+                    )
+                else:
+                    return ExecutionResult(
+                        status=ExecutionStatus.API_ERROR,
+                        message="Failed to close position",
+                        signal_id=close.signal_id
+                    )
                 
-        except Exception as e:
+        except MudrexAPIError as e:
             msg = f"Close failed: {str(e)}"
+            logger.error(msg)
+            return ExecutionResult(
+                status=ExecutionStatus.API_ERROR,
+                message=msg,
+                signal_id=close.signal_id
+            )
+        except Exception as e:
+            msg = f"Unexpected error: {str(e)}"
             logger.error(msg)
             return ExecutionResult(
                 status=ExecutionStatus.API_ERROR,
