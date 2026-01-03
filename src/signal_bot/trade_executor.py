@@ -49,7 +49,6 @@ class TradeExecutor:
     
     def __init__(
         self,
-        api_key: str,
         api_secret: str,
         trade_amount_usdt: float = 50.0,
         max_leverage: int = 20,
@@ -59,13 +58,12 @@ class TradeExecutor:
         Initialize the trade executor.
         
         Args:
-            api_key: Mudrex API key
             api_secret: Mudrex API secret
             trade_amount_usdt: Amount in USDT to trade per signal
             max_leverage: Maximum allowed leverage
             testnet: Use testnet (not yet supported by Mudrex)
         """
-        self.client = MudrexClient(api_key=api_key, api_secret=api_secret)
+        self.client = MudrexClient(api_secret=api_secret)
         self.trade_amount_usdt = trade_amount_usdt
         self.max_leverage = max_leverage
         self.testnet = testnet

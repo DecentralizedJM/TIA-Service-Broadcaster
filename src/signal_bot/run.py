@@ -56,23 +56,28 @@ def run_webhook_server(settings: Settings):
     )
 
 
-async def run_polling_mode(settings: Settings):
+def run_polling_mode(settings: Settings):
     """Run in polling mode (development)."""
     import asyncio
     
     # Initialize crypto
     init_crypto(settings.encryption_secret)
     
-    # Connect to database
+    # Create database (will connect when bot starts via post_init)
     database = Database(settings.database_path)
-    await database.connect()
     
+    # Create bot
+    bot = SignalBot(settings, database)
+    
+    # For Python 3.10+, ensure there's an event loop policy set
+    # run_polling() will handle its own loop internally
     try:
-        # Create and run bot
-        bot = SignalBot(settings, database)
-        bot.run_polling()
-    finally:
-        await database.close()
+        asyncio.get_event_loop()
+    except RuntimeError:
+        # No event loop exists, create one for the main thread
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    
+    bot.run_polling()
 
 
 def main():
@@ -137,8 +142,7 @@ def main():
     if args.polling:
         # Run in polling mode
         logger.info("Starting in POLLING mode (for development)...")
-        import asyncio
-        asyncio.run(run_polling_mode(settings))
+        run_polling_mode(settings)
     else:
         # Run webhook server
         logger.info("Starting in WEBHOOK mode (for production)...")

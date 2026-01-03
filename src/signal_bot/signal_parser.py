@@ -72,9 +72,13 @@ class SignalParser:
     # Signal ID pattern: SIG-DDMMYY-SYMBOL (e.g., SIG-030126-BTCUSDT)
     SIGNAL_ID_PATTERN = r"SIG-\d{6}-[A-Z0-9]+"
     
-    # Regex patterns
+    # Regex patterns - support both orders: "LONG BTCUSDT" or "BTCUSDT LONG"
     SIGNAL_PATTERN = re.compile(
-        r"/signal\s+(LONG|SHORT)\s+([A-Z0-9]+)\s+(.+)",
+        r"/signal\s+(LONG|SHORT)\s+([A-Z0-9]+)",
+        re.IGNORECASE
+    )
+    SIGNAL_PATTERN_ALT = re.compile(
+        r"/signal\s+([A-Z0-9]+)\s+(LONG|SHORT)",
         re.IGNORECASE
     )
     
@@ -93,12 +97,12 @@ class SignalParser:
         re.IGNORECASE
     )
     
-    # Parameter patterns
+    # Parameter patterns - support both "sl=49000" and "SL: 49000" formats
     PARAM_PATTERNS = {
-        'entry': re.compile(r'entry[=:]?\s*([\d.]+)', re.IGNORECASE),
-        'sl': re.compile(r'sl[=:]?\s*([\d.]+)', re.IGNORECASE),
-        'tp': re.compile(r'tp[=:]?\s*([\d.]+)', re.IGNORECASE),
-        'lev': re.compile(r'lev(?:erage)?[=:]?\s*(\d+)x?', re.IGNORECASE),
+        'entry': re.compile(r'entry[=:\s]+([\d.]+)', re.IGNORECASE),
+        'sl': re.compile(r'sl[=:\s]+([\d.]+)', re.IGNORECASE),
+        'tp': re.compile(r'tp[=:\s]+([\d.]+)', re.IGNORECASE),
+        'lev': re.compile(r'lev(?:erage)?[=:\s]+(\d+)x?', re.IGNORECASE),
     }
     
     @classmethod
@@ -137,17 +141,32 @@ class SignalParser:
         """
         Parse a /signal command.
         
-        Examples:
+        Supports multiple formats:
             /signal LONG BTCUSDT entry=50000 sl=49000 tp=52000 lev=10x
-            /signal SHORT ETHUSDT market sl=3800 tp=3500 lev=5x
+            /signal BTCUSDT LONG
+            Entry: 50000
+            SL: 49000
+            TP: 52000
+            Leverage: 10
         """
-        match = cls.SIGNAL_PATTERN.match(message.strip())
-        if not match:
-            return None
+        text = message.strip()
         
-        signal_type_str = match.group(1).upper()
-        symbol = match.group(2).upper()
-        params_text = match.group(3)
+        # Try pattern 1: /signal LONG BTCUSDT
+        match = cls.SIGNAL_PATTERN.match(text)
+        if match:
+            signal_type_str = match.group(1).upper()
+            symbol = match.group(2).upper()
+        else:
+            # Try pattern 2: /signal BTCUSDT LONG
+            match = cls.SIGNAL_PATTERN_ALT.match(text)
+            if match:
+                symbol = match.group(1).upper()
+                signal_type_str = match.group(2).upper()
+            else:
+                return None
+        
+        # Use entire message for parameter extraction (supports multi-line)
+        params_text = text
         
         # Parse signal type
         signal_type = SignalType.LONG if signal_type_str == "LONG" else SignalType.SHORT
@@ -157,7 +176,7 @@ class SignalParser:
         order_type = OrderType.MARKET if is_market else OrderType.LIMIT
         
         # Extract parameters
-        entry_price = None if is_market else cls._extract_param(params_text, 'entry')
+        entry_price = cls._extract_param(params_text, 'entry')
         stop_loss = cls._extract_param(params_text, 'sl')
         take_profit = cls._extract_param(params_text, 'tp')
         leverage = cls._extract_param(params_text, 'lev')
@@ -167,8 +186,10 @@ class SignalParser:
             raise SignalParseError("Stop loss (sl) is required")
         if take_profit is None:
             raise SignalParseError("Take profit (tp) is required")
-        if not is_market and entry_price is None:
-            raise SignalParseError("Entry price is required for limit orders")
+        
+        # If entry price is provided, it's a limit order
+        if entry_price is not None:
+            order_type = OrderType.LIMIT
         
         # Default leverage if not specified
         if leverage is None:

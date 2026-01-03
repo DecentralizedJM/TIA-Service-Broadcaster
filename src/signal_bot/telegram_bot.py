@@ -432,32 +432,36 @@ class SignalBot:
             return
         
         text = message.text.strip()
+        chat_id = message.chat_id
+        
+        # Debug logging
+        logger.debug(f"Received message from chat {chat_id}: {text[:50]}...")
         
         # Only process commands
         if not text.startswith('/'):
             return
         
-        # Check if from admin or signal channel
+        # Check source
         user_id = message.from_user.id if message.from_user else None
-        chat_id = message.chat_id
-        
-        is_admin_dm = user_id and self._is_admin(user_id) and message.chat.type == "private"
         is_signal_channel = self._is_signal_channel(chat_id)
+        is_admin_dm = user_id and self._is_admin(user_id) and message.chat.type == "private"
         
-        # Only admin can post signals
+        logger.info(f"Signal check - chat_id: {chat_id}, user_id: {user_id}, is_channel: {is_signal_channel}, is_admin_dm: {is_admin_dm}")
+        
+        # Accept signals from:
+        # 1. Admin's DM
+        # 2. The designated signal channel (regardless of from_user - channel posts may not have it)
         if not is_admin_dm and not is_signal_channel:
+            logger.debug(f"Ignoring message - not from admin DM or signal channel")
             return
-        
-        # Additional check: if from channel, verify it's our channel
-        if is_signal_channel and message.from_user:
-            if not self._is_admin(message.from_user.id):
-                return
         
         try:
             parsed = SignalParser.parse(text)
             
             if parsed is None:
                 return
+            
+            logger.info(f"Parsed signal: {type(parsed).__name__}")
             
             if isinstance(parsed, Signal):
                 await self._handle_new_signal(message, parsed)
@@ -505,9 +509,27 @@ class SignalBot:
     
     # ==================== Bot Setup ====================
     
+    async def _post_init(self, application: Application):
+        """Called after Application.initialize() - connect database."""
+        logger.info("Initializing database connection...")
+        await self.db.connect()
+        logger.info("Database connected successfully")
+    
+    async def _post_shutdown(self, application: Application):
+        """Called after Application.shutdown() - close database."""
+        logger.info("Closing database connection...")
+        await self.db.close()
+        logger.info("Database closed")
+    
     def build_application(self) -> Application:
         """Build the Telegram application."""
-        self.app = Application.builder().token(self.settings.telegram_bot_token).build()
+        self.app = (
+            Application.builder()
+            .token(self.settings.telegram_bot_token)
+            .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
+            .build()
+        )
         self.bot = self.app.bot
         
         # Registration conversation handler

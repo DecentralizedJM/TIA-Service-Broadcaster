@@ -122,9 +122,8 @@ class SignalBroadcaster:
     ) -> TradeResult:
         """Execute a signal for a single subscriber using the Mudrex SDK."""
         
-        # Create SDK client for this subscriber
+        # Create SDK client for this subscriber (only api_secret needed)
         client = MudrexClient(
-            api_key=subscriber.api_key,
             api_secret=subscriber.api_secret
         )
         
