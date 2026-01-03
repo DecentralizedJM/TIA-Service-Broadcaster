@@ -4,7 +4,7 @@ Signal Broadcaster - Execute trades for all subscribers when a signal is receive
 This is the core of the centralized system:
 1. Receive signal from admin
 2. Loop through all active subscribers
-3. Execute trade on each subscriber's Mudrex account
+3. Execute trade on each subscriber's Mudrex account (using SDK)
 4. Notify each subscriber of result via Telegram DM
 """
 
@@ -13,15 +13,14 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
-import httpx
+
+from mudrex import MudrexClient
+from mudrex.exceptions import MudrexAPIError
 
 from .database import Database, Subscriber
 from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose
 
 logger = logging.getLogger(__name__)
-
-# Mudrex API base URL
-MUDREX_API_BASE = "https://trade.mudrex.com/fapi/v1"
 
 
 class TradeStatus(Enum):
@@ -42,103 +41,11 @@ class TradeResult:
     order_id: Optional[str] = None
 
 
-class MudrexTrader:
-    """Execute trades on Mudrex for a single user."""
-    
-    def __init__(self, api_key: str, api_secret: str):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.client = httpx.AsyncClient(timeout=30.0)
-    
-    async def close(self):
-        await self.client.aclose()
-    
-    def _headers(self) -> dict:
-        return {
-            "X-API-Key": self.api_key,
-            "X-Authentication": self.api_secret,
-            "Content-Type": "application/json",
-        }
-    
-    async def get_balance(self) -> float:
-        """Get available USDT balance."""
-        try:
-            resp = await self.client.get(
-                f"{MUDREX_API_BASE}/wallet",
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return float(data.get("available_balance", 0))
-        except Exception as e:
-            logger.error(f"Failed to get balance: {e}")
-            return 0.0
-    
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Set leverage for a symbol."""
-        try:
-            resp = await self.client.patch(
-                f"{MUDREX_API_BASE}/leverage?is_symbol",
-                headers=self._headers(),
-                json={"symbol": symbol, "leverage": leverage},
-            )
-            resp.raise_for_status()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to set leverage: {e}")
-            return False
-    
-    async def create_order(
-        self,
-        symbol: str,
-        side: str,
-        order_type: str,
-        quantity: float,
-        price: Optional[float] = None,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-    ) -> Optional[str]:
-        """
-        Create an order on Mudrex.
-        
-        Returns order_id on success, None on failure.
-        """
-        try:
-            payload = {
-                "symbol": symbol,
-                "side": side,
-                "type": order_type,
-                "quantity": quantity,
-            }
-            
-            if price and order_type == "LIMIT":
-                payload["price"] = price
-            if stop_loss:
-                payload["stop_loss"] = stop_loss
-            if take_profit:
-                payload["take_profit"] = take_profit
-            
-            resp = await self.client.post(
-                f"{MUDREX_API_BASE}/orders?is_symbol",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("order_id")
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Order failed: {e.response.text}")
-            return None
-        except Exception as e:
-            logger.error(f"Order failed: {e}")
-            return None
-
-
 class SignalBroadcaster:
     """
     Broadcast signals to all subscribers.
     
-    Executes trades in parallel for all active subscribers.
+    Executes trades in parallel for all active subscribers using the Mudrex SDK.
     """
     
     def __init__(self, database: Database):
@@ -210,12 +117,19 @@ class SignalBroadcaster:
         signal: Signal,
         subscriber: Subscriber,
     ) -> TradeResult:
-        """Execute a signal for a single subscriber."""
-        trader = MudrexTrader(subscriber.api_key, subscriber.api_secret)
+        """Execute a signal for a single subscriber using the Mudrex SDK."""
+        
+        # Create SDK client for this subscriber
+        client = MudrexClient(
+            api_key=subscriber.api_key,
+            api_secret=subscriber.api_secret
+        )
         
         try:
             # Check balance
-            balance = await trader.get_balance()
+            wallet = client.wallet.get()
+            balance = float(wallet.available_balance) if wallet else 0.0
+            
             if balance < subscriber.trade_amount_usdt:
                 await self.db.record_trade(
                     telegram_id=subscriber.telegram_id,
@@ -233,62 +147,108 @@ class SignalBroadcaster:
                     message=f"Insufficient balance: {balance:.2f} USDT",
                 )
             
+            # Check if symbol exists
+            if not client.assets.exists(signal.symbol):
+                await self.db.record_trade(
+                    telegram_id=subscriber.telegram_id,
+                    signal_id=signal.signal_id,
+                    symbol=signal.symbol,
+                    side=signal.signal_type.value,
+                    order_type=signal.order_type.value,
+                    status="SYMBOL_NOT_FOUND",
+                    error_message=f"Symbol {signal.symbol} not found",
+                )
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SYMBOL_NOT_FOUND,
+                    message=f"Symbol not found: {signal.symbol}",
+                )
+            
             # Set leverage (capped at subscriber's max)
             leverage = min(signal.leverage, subscriber.max_leverage)
-            await trader.set_leverage(signal.symbol, leverage)
+            client.leverage.set(symbol=signal.symbol, leverage=str(leverage))
             
-            # Determine order params
-            side = "BUY" if signal.signal_type == SignalType.LONG else "SELL"
-            order_type = "MARKET" if signal.order_type == OrderType.MARKET else "LIMIT"
+            # Determine side (SDK uses LONG/SHORT)
+            side = "LONG" if signal.signal_type == SignalType.LONG else "SHORT"
             
-            # Create order
-            order_id = await trader.create_order(
-                symbol=signal.symbol,
-                side=side,
-                order_type=order_type,
-                quantity=subscriber.trade_amount_usdt,
-                price=signal.entry_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-            )
-            
-            if order_id:
-                await self.db.record_trade(
-                    telegram_id=subscriber.telegram_id,
-                    signal_id=signal.signal_id,
+            # Create order using SDK
+            if signal.order_type == OrderType.MARKET:
+                # Market order
+                order = client.orders.create_market_order(
                     symbol=signal.symbol,
                     side=side,
-                    order_type=order_type,
-                    status="SUCCESS",
-                    quantity=subscriber.trade_amount_usdt,
-                    entry_price=signal.entry_price,
-                )
-                return TradeResult(
-                    subscriber_id=subscriber.telegram_id,
-                    username=subscriber.username,
-                    status=TradeStatus.SUCCESS,
-                    message=f"{side} {signal.symbol} @ {order_type}",
-                    order_id=order_id,
+                    quantity=str(subscriber.trade_amount_usdt),
+                    leverage=str(leverage),
+                    stoploss_price=str(signal.stop_loss) if signal.stop_loss else None,
+                    takeprofit_price=str(signal.take_profit) if signal.take_profit else None,
                 )
             else:
-                await self.db.record_trade(
-                    telegram_id=subscriber.telegram_id,
-                    signal_id=signal.signal_id,
+                # Limit order
+                order = client.orders.create_limit_order(
                     symbol=signal.symbol,
                     side=side,
-                    order_type=order_type,
-                    status="API_ERROR",
-                    error_message="Order creation failed",
+                    price=str(signal.entry_price),
+                    quantity=str(subscriber.trade_amount_usdt),
+                    leverage=str(leverage),
+                    stoploss_price=str(signal.stop_loss) if signal.stop_loss else None,
+                    takeprofit_price=str(signal.take_profit) if signal.take_profit else None,
                 )
-                return TradeResult(
-                    subscriber_id=subscriber.telegram_id,
-                    username=subscriber.username,
-                    status=TradeStatus.API_ERROR,
-                    message="Order creation failed",
-                )
-        
-        finally:
-            await trader.close()
+            
+            # Record success
+            await self.db.record_trade(
+                telegram_id=subscriber.telegram_id,
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                side=side,
+                order_type=signal.order_type.value,
+                status="SUCCESS",
+                quantity=subscriber.trade_amount_usdt,
+                entry_price=signal.entry_price,
+            )
+            
+            return TradeResult(
+                subscriber_id=subscriber.telegram_id,
+                username=subscriber.username,
+                status=TradeStatus.SUCCESS,
+                message=f"{side} {signal.symbol} @ {signal.order_type.value}",
+                order_id=order.order_id,
+            )
+            
+        except MudrexAPIError as e:
+            logger.error(f"Mudrex API error for {subscriber.telegram_id}: {e}")
+            await self.db.record_trade(
+                telegram_id=subscriber.telegram_id,
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                side=signal.signal_type.value,
+                order_type=signal.order_type.value,
+                status="API_ERROR",
+                error_message=str(e),
+            )
+            return TradeResult(
+                subscriber_id=subscriber.telegram_id,
+                username=subscriber.username,
+                status=TradeStatus.API_ERROR,
+                message=f"API error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error for {subscriber.telegram_id}: {e}")
+            await self.db.record_trade(
+                telegram_id=subscriber.telegram_id,
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                side=signal.signal_type.value,
+                order_type=signal.order_type.value,
+                status="API_ERROR",
+                error_message=str(e),
+            )
+            return TradeResult(
+                subscriber_id=subscriber.telegram_id,
+                username=subscriber.username,
+                status=TradeStatus.API_ERROR,
+                message=f"Error: {e}",
+            )
     
     async def broadcast_close(self, close: SignalClose) -> List[TradeResult]:
         """
