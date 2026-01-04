@@ -2,6 +2,7 @@
 builder = "NIXPACKS"
 
 [deploy]
+startCommand = "python start.py"
 healthcheckPath = "/health"
 healthcheckTimeout = 600
 numReplicas = 1
