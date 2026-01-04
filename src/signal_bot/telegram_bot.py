@@ -276,6 +276,37 @@ class SignalBot:
             )
             return ConversationHandler.END
         
+        # Validate API credentials by making a test call
+        await update.message.reply_text("🔄 Validating your API credentials...")
+        
+        try:
+            from mudrex import MudrexClient
+            client = MudrexClient(api_secret=api_secret)
+            balance = client.wallet.get_futures_balance()
+            
+            if balance is None:
+                await update.message.reply_text(
+                    "❌ **Invalid API credentials!**\n\n"
+                    "Could not connect to Mudrex. Please check:\n"
+                    "1. Your API secret is correct\n"
+                    "2. API has Futures trading permission\n\n"
+                    "Try again with /register",
+                    parse_mode="Markdown"
+                )
+                return ConversationHandler.END
+                
+            logger.info(f"API validated for {user.id}: Balance = {balance.balance} USDT")
+            
+        except Exception as e:
+            logger.error(f"API validation failed for {user.id}: {e}")
+            await update.message.reply_text(
+                f"❌ **API validation failed!**\n\n"
+                f"Error: {str(e)[:100]}\n\n"
+                f"Please check your credentials and try /register again.",
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
+        
         # Save to database (encrypted)
         try:
             subscriber = await self.db.add_subscriber(
