@@ -3,14 +3,14 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install git for SDK installation from GitHub
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+
+# Copy all project files first
+COPY pyproject.toml README.md ./
+COPY src/ src/
 
 # Install dependencies
-COPY pyproject.toml .
 RUN pip install --no-cache-dir .
-
-# Copy source code
-COPY src/ src/
 
 # Create data directory for SQLite (will be mounted as volume in Railway)
 RUN mkdir -p /app/data
