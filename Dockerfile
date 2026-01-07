@@ -1,10 +1,11 @@
 # Multi-stage Dockerfile for Railway deployment
 FROM python:3.11-slim AS builder
 
-# Install system dependencies
+# Install system dependencies (including git for pip git+https installs)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
