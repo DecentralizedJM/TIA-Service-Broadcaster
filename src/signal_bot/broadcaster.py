@@ -231,19 +231,25 @@ class SignalBroadcaster:
             
             # Get asset details for quantity calculation
             logger.info(f"Getting asset info for {signal.symbol}...")
-            asset = client.assets.get(signal.symbol)
-            if not asset:
-                logger.error(f"Symbol not found: {signal.symbol}")
+            try:
+                asset = client.assets.get(signal.symbol)
+                if not asset:
+                    raise ValueError(f"Asset returned None for {signal.symbol}")
+                # Verify essential fields exist
+                if not hasattr(asset, 'quantity_step') or not hasattr(asset, 'min_quantity'):
+                    logger.warning(f"Asset {signal.symbol} missing fields: {asset.__dict__}")
+            except Exception as asset_error:
+                logger.error(f"Symbol lookup failed for {signal.symbol}: {asset_error}")
                 return TradeResult(
                     subscriber_id=subscriber.telegram_id,
                     username=subscriber.username,
                     status=TradeStatus.SYMBOL_NOT_FOUND,
-                    message=f"Symbol not found on Mudrex: {signal.symbol}",
+                    message=f"Symbol not found on Mudrex: {signal.symbol}. Check if this pair is available for futures trading.",
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                 )
             
-            logger.info(f"Asset info: quantity_step={asset.quantity_step}, min_qty={asset.min_quantity}")
+            logger.info(f"Asset info: symbol={asset.symbol}, quantity_step={asset.quantity_step}, min_qty={asset.min_quantity}")
             
             # Set leverage (capped at subscriber's max)
             leverage = min(signal.leverage, subscriber.max_leverage)
@@ -362,12 +368,24 @@ class SignalBroadcaster:
             )
             
         except MudrexAPIError as e:
-            logger.error(f"Mudrex API error for {subscriber.telegram_id}: {e}", exc_info=True)
+            # Extract more details from the API error
+            error_msg = str(e)
+            error_code = getattr(e, 'code', 'UNKNOWN')
+            status_code = getattr(e, 'status_code', 0)
+            request_id = getattr(e, 'request_id', None)
+            
+            logger.error(f"Mudrex API error for {subscriber.telegram_id}: {error_msg}")
+            logger.error(f"  Error code: {error_code}, Status: {status_code}, Request ID: {request_id}")
+            logger.error(f"  Full error: {repr(e)}")
+            
+            # Include more context in the error message
+            detailed_msg = f"Mudrex API error: {e.message if hasattr(e, 'message') else error_msg} | Code: {error_code} | Status: {status_code}"
+            
             return TradeResult(
                 subscriber_id=subscriber.telegram_id,
                 username=subscriber.username,
                 status=TradeStatus.API_ERROR,
-                message=f"Mudrex API error: {e}",
+                message=detailed_msg,
                 side=signal.signal_type.value,
                 order_type=signal.order_type.value,
             )
