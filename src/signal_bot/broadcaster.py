@@ -187,6 +187,26 @@ class SignalBroadcaster:
         
         return result
     
+    def _round_price_to_step(self, price: float, price_step: float) -> float:
+        """Round price to match the asset's price step."""
+        try:
+            if price_step <= 0:
+                return price
+            
+            # Using decimal concept logic: round(value / step) * step
+            rounded = round(price / price_step) * price_step
+            
+            # Determine precision
+            if '.' in str(price_step):
+                precision = len(str(price_step).split('.')[-1])
+            else:
+                precision = 0
+                
+            return round(rounded, precision)
+        except Exception as e:
+            logger.warning(f"Price rounding failed for {price} (step {price_step}): {e}")
+            return price
+
     def _execute_trade_sync(
         self,
         signal: Signal,
@@ -230,20 +250,7 @@ class SignalBroadcaster:
                 logger.info(f"Auto-adjusting margin from {target_margin} to {balance:.2f} USDT (using available balance)")
                 target_margin = balance
             
-            # Set leverage (capped at subscriber's max)
-            leverage = min(signal.leverage, subscriber.max_leverage)
-            logger.info(f"Setting leverage to {leverage} for {signal.symbol}...")
-            client.leverage.set(
-                symbol=signal.symbol,
-                leverage=str(leverage),
-                margin_type="ISOLATED"
-            )
-
-            # Calculate NOTIONAL amount (Total Order Value = Margin * Leverage)
-            trade_amount_notional = target_margin * leverage
-            logger.info(f"Target Margin: ${target_margin} x Leverage {leverage} = Notional: ${trade_amount_notional}")
-
-            # Get asset details
+            # Get asset details early
             logger.info(f"Getting asset info for {signal.symbol}...")
             try:
                 asset = client.assets.get(signal.symbol)
@@ -259,7 +266,20 @@ class SignalBroadcaster:
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                 )
-            
+
+            # Set leverage (capped at subscriber's max)
+            leverage = min(signal.leverage, subscriber.max_leverage)
+            logger.info(f"Setting leverage to {leverage} for {signal.symbol}...")
+            client.leverage.set(
+                symbol=signal.symbol,
+                leverage=str(leverage),
+                margin_type="ISOLATED"
+            )
+
+            # Calculate NOTIONAL amount (Total Order Value = Margin * Leverage)
+            trade_amount_notional = target_margin * leverage
+            logger.info(f"Target Margin: ${target_margin} x Leverage {leverage} = Notional: ${trade_amount_notional}")
+
             # Determine Price
             price = None
             if signal.entry_price:
@@ -274,17 +294,27 @@ class SignalBroadcaster:
                 logger.warning(f"Could not determine price for {signal.symbol}, using fallback 1.0")
                 price = 1.0
             
-            # Round price if needed (for LIMIT orders)
-            if hasattr(asset, 'price_step') and asset.price_step:
-                try:
-                    price_step = float(asset.price_step)
-                    if price_step > 0:
-                        rounded_price = round(price / price_step) * price_step
-                        # Precision logic
-                        prec = len(str(asset.price_step).split('.')[-1]) if '.' in str(asset.price_step) else 0
-                        price = round(rounded_price, prec)
-                except Exception:
-                    pass
+            # Round PRICES (Entry, SL, TP) to asset's price_step
+            # This is crucial to avoid 400 INVALID_PRICE errors
+            price_step = float(asset.price_step) if (hasattr(asset, 'price_step') and asset.price_step) else 0.0
+            
+            if price_step > 0:
+                # Round Entry Price (for limit orders or calculation)
+                original_price = price
+                price = self._round_price_to_step(price, price_step)
+                if price != original_price:
+                    logger.info(f"Rounded entry price: {original_price} -> {price}")
+                    
+                # Round SL/TP if present
+                if signal.stop_loss:
+                     rounded_sl = self._round_price_to_step(signal.stop_loss, price_step)
+                     logger.info(f"Rounded SL: {signal.stop_loss} -> {rounded_sl}")
+                     signal.stop_loss = rounded_sl
+                     
+                if signal.take_profit:
+                     rounded_tp = self._round_price_to_step(signal.take_profit, price_step)
+                     logger.info(f"Rounded TP: {signal.take_profit} -> {rounded_tp}")
+                     signal.take_profit = rounded_tp
 
             # Calculate Quantity from Notional Amount
             qty, actual_value = calculate_order_from_usd(
@@ -334,7 +364,7 @@ class SignalBroadcaster:
             side = "LONG" if signal.signal_type == SignalType.LONG else "SHORT"
             qty_str = str(qty)
             
-            # Prepare SL/TP params
+            # Prepare SL/TP params (ensure they are strings)
             sl_param = str(signal.stop_loss) if signal.stop_loss else None
             tp_param = str(signal.take_profit) if signal.take_profit else None
 
