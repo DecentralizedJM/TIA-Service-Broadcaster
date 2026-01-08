@@ -634,7 +634,6 @@ class SignalBot:
             await self.bot.send_message(
                 chat_id=self.settings.admin_telegram_id,
                 text=summary,
-                parse_mode="Markdown"
             )
         except Exception as e:
             logger.error(f"Failed to send broadcast summary to admin: {e}")
@@ -646,7 +645,6 @@ class SignalBot:
                 await self.bot.send_message(
                     chat_id=result.telegram_id,
                     text=notification,
-                    parse_mode="Markdown"
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {result.telegram_id}: {e}")
