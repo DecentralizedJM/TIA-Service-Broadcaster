@@ -161,7 +161,7 @@ class SignalBot:
             return ConversationHandler.END
         
         await update.message.reply_text(
-            "� **Registration Step 1/3**\n\n"
+            "🔑 **Registration Step 1/3**\n\n"
             "Please send your **Mudrex API Key**.\n\n"
             "You can get this from:\n"
             "Mudrex → Settings → API Keys\n\n"
@@ -502,464 +502,161 @@ class SignalBot:
         else:
             await update.message.reply_text(
                 "👆 **Trade mode set to MANUAL**\n\n"
-                "You will receive a confirmation message for each trade signal.\n"
-                "The trade will only execute after you approve it.\n\n"
-                "💡 You have 5 minutes to confirm each trade.",
+                "You'll receive a confirmation prompt for each trade signal.\n\n"
+                "You can approve or reject each trade individually.",
                 parse_mode="Markdown"
             )
     
     # ==================== Admin Commands ====================
     
     async def admin_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /adminstats command (admin only)."""
+        """Handle /stats command (admin only)."""
         if not self._is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Admin only command.")
             return
         
-        stats = await self.db.get_stats()
+        stats = await self.db.get_subscriber_stats()
         
         await update.message.reply_text(
-            f"📊 **Admin Stats**\n"
+            f"📊 **Bot Statistics**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 Total Subscribers: {stats['total_subscribers']}\n"
-            f"✅ Active: {stats['active_subscribers']}\n"
-            f"📈 Total Trades: {stats['total_trades']}\n"
-            f"📡 Active Signals: {stats['active_signals']}\n"
+            f"👥 Total Subscribers: {stats['total']}\n"
+            f"✅ Active: {stats['active']}\n"
+            f"🤖 AUTO Mode: {stats['auto_mode']}\n"
+            f"👆 MANUAL Mode: {stats['manual_mode']}\n"
             f"━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
     
+    async def admin_broadcast_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /broadcast command (admin only)."""
+        if not self._is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Admin only command.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📢 **Broadcast Message**\n\n"
+                "Usage: `/broadcast <message>`\n\n"
+                "This will send a message to all active subscribers.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        message = " ".join(context.args)
+        subscribers = await self.db.get_active_subscribers()
+        
+        sent = 0
+        failed = 0
+        
+        for sub in subscribers:
+            try:
+                await self.bot.send_message(
+                    chat_id=sub.telegram_id,
+                    text=f"📢 **Announcement**\n\n{message}",
+                    parse_mode="Markdown"
+                )
+                sent += 1
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to {sub.telegram_id}: {e}")
+                failed += 1
+        
+        await update.message.reply_text(
+            f"📢 Broadcast complete!\n\n"
+            f"✅ Sent: {sent}\n"
+            f"❌ Failed: {failed}"
+        )
+    
     # ==================== Signal Handling ====================
     
-    async def handle_signal_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle messages that might be signals (non-command signals posted directly)."""
-        message = update.message or update.channel_post
-        
+    async def handle_channel_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle messages from the signal channel."""
+        message = update.channel_post
         if not message or not message.text:
             return
         
-        text = message.text.strip()
-        chat_id = message.chat_id
-        
-        # Skip /signal command - it's handled by signal_command handler
-        if text.lower().startswith('/signal'):
+        # Only process from signal channel
+        if not self._is_signal_channel(message.chat_id):
             return
         
-        # Debug logging
-        logger.debug(f"Received message from chat {chat_id}: {text[:50]}...")
-        
-        # Check source
-        user_id = message.from_user.id if message.from_user else None
-        is_signal_channel = self._is_signal_channel(chat_id)
-        is_admin_dm = user_id and self._is_admin(user_id) and message.chat.type == "private"
-        
-        logger.info(f"Signal check - chat_id: {chat_id}, user_id: {user_id}, is_channel: {is_signal_channel}, is_admin_dm: {is_admin_dm}")
-        
-        # Accept signals from:
-        # 1. Admin's DM
-        # 2. The designated signal channel (regardless of from_user - channel posts may not have it)
-        if not is_admin_dm and not is_signal_channel:
-            logger.debug(f"Ignoring message - not from admin DM or signal channel")
-            return
-        
+        # Try to parse as signal
         try:
-            parsed = SignalParser.parse(text)
-            
-            if parsed is None:
-                return
-            
-            logger.info(f"Parsed signal: {type(parsed).__name__}")
-            
-            if isinstance(parsed, Signal):
-                await self._handle_new_signal(message, parsed)
-            elif isinstance(parsed, SignalClose):
-                await self._handle_close_signal(message, parsed)
-                
-        except SignalParseError as e:
-            await message.reply_text(f"⚠️ Signal parse error: {e}")
-        except Exception as e:
-            logger.exception(f"Error handling signal: {e}")
-    
-    async def _handle_new_signal(self, message, signal: Signal):
-        """Handle a new trading signal from admin."""
-        # Show signal received
-        summary = format_signal_summary(signal)
-        await message.reply_text(summary, parse_mode="Markdown")
-        
-        # Broadcast to all subscribers (returns AUTO results + MANUAL subscribers list)
-        results, manual_subscribers = await self.broadcaster.broadcast_signal(signal)
-        
-        # Send summary to admin (including manual count)
-        broadcast_summary = format_broadcast_summary(signal, results, len(manual_subscribers))
-        await message.reply_text(broadcast_summary, parse_mode="Markdown")
-        
-        # Notify each AUTO subscriber via DM with trade result
-        for result in results:
-            try:
-                # Check if insufficient balance but has some available
-                if (result.status == TradeStatus.INSUFFICIENT_BALANCE 
-                    and result.available_balance 
-                    and result.available_balance >= 1.0):
-                    # Offer to trade with available balance
-                    await self._send_reduced_balance_offer(signal, result)
-                else:
-                    notification = format_user_trade_notification(signal, result)
-                    await self.bot.send_message(
-                        chat_id=result.subscriber_id,
-                        text=notification,
-                        parse_mode="Markdown"
-                    )
-            except Exception as e:
-                logger.error(f"Failed to notify {result.subscriber_id}: {e}")
-        
-        # Send confirmation request to MANUAL subscribers
-        for subscriber in manual_subscribers:
-            try:
-                await self._send_manual_confirmation(signal, subscriber)
-            except Exception as e:
-                logger.error(f"Failed to send confirmation to {subscriber.telegram_id}: {e}")
-    
-    async def _send_manual_confirmation(self, signal: Signal, subscriber):
-        """Send trade confirmation request to a MANUAL mode subscriber."""
-        # Use short callback data format: "c:{signal_id}" or "r:{signal_id}"
-        # Telegram limit is 64 bytes
-        confirm_data = f"c:{signal.signal_id}"
-        reject_data = f"r:{signal.signal_id}"
-        
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Execute Trade", callback_data=confirm_data),
-                InlineKeyboardButton("❌ Skip", callback_data=reject_data),
-            ]
-        ])
-        
-        text = f"""
-👆 **Trade Confirmation Required**
-━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
-📊 {signal.signal_type.value} **{signal.symbol}**
-📋 Type: {signal.order_type.value}
-💵 Entry: {signal.entry_price or "Market"}
-🛑 SL: {signal.stop_loss or "Not set"}
-🎯 TP: {signal.take_profit or "Not set"}
-⚡ Leverage: {signal.leverage}x
-💰 Your amount: {subscriber.trade_amount_usdt} USDT
-━━━━━━━━━━━━━━━━━━━━
-
-⏰ **You have 5 minutes to confirm.**
-Click "Execute Trade" to proceed or "Skip" to ignore.
-""".strip()
-        
-        await self.bot.send_message(
-            chat_id=subscriber.telegram_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
-        
-        logger.info(f"Sent confirmation request to {subscriber.telegram_id} for signal {signal.signal_id}")
-    
-    async def _send_reduced_balance_offer(self, signal: Signal, result):
-        """Send an offer to trade with available balance when configured amount is insufficient."""
-        available = result.available_balance
-        
-        # Callback data: "b:{signal_id}:{amount}" (b = balance trade)
-        accept_data = f"b:{signal.signal_id}:{available:.2f}"
-        reject_data = f"r:{signal.signal_id}"
-        
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"✅ Trade with ${available:.2f}", callback_data=accept_data),
-                InlineKeyboardButton("❌ Skip", callback_data=reject_data),
-            ]
-        ])
-        
-        text = f"""
-💰 **Insufficient Balance**
-━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
-📊 {signal.signal_type.value} **{signal.symbol}**
-
-Your configured amount: **${result.message.split('Requested: ')[1].split(' USDT')[0]} USDT**
-Available balance: **${available:.2f} USDT**
-
-Would you like to execute this trade with your available balance instead?
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
-        
-        await self.bot.send_message(
-            chat_id=result.subscriber_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
-        
-        logger.info(f"Sent reduced balance offer to {result.subscriber_id} for signal {signal.signal_id}")
-    
-    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle callback button presses (for manual trade confirmations)."""
-        query = update.callback_query
-        await query.answer()  # Acknowledge the button press
-        
-        data = query.data
-        user_id = query.from_user.id
-        
-        # Parse callback data formats:
-        # "c:{signal_id}" - confirm trade (manual mode)
-        # "r:{signal_id}" - reject/skip trade
-        # "b:{signal_id}:{amount}" - trade with reduced balance
-        if data.startswith("c:"):
-            signal_id = data[2:]
-            await self._execute_confirmed_trade(query, signal_id, user_id)
-        elif data.startswith("r:"):
-            signal_id = data[2:]
-            await query.edit_message_text(
-                f"⏭️ **Trade Skipped**\n\n"
-                f"Signal `{signal_id}` was not executed.\n"
-                f"You can always switch to AUTO mode with /setmode auto",
-                parse_mode="Markdown"
-            )
-        elif data.startswith("b:"):
-            # Balance trade: b:{signal_id}:{amount}
-            parts = data[2:].split(":")
-            if len(parts) == 2:
-                signal_id, amount_str = parts
-                try:
-                    amount = float(amount_str)
-                    await self._execute_with_balance(query, signal_id, user_id, amount)
-                except ValueError:
-                    await query.edit_message_text("❌ Invalid amount.")
-            else:
-                await query.edit_message_text("❌ Invalid request.")
-        else:
-            await query.edit_message_text("❌ Invalid request.")
-    
-    async def _execute_confirmed_trade(self, query, signal_id: str, user_id: int):
-        """Execute a trade after user confirms in MANUAL mode."""
-        # Get subscriber
-        subscriber = await self.db.get_subscriber(user_id)
-        if not subscriber or not subscriber.is_active:
-            await query.edit_message_text("❌ You're not registered anymore.")
+            signal = SignalParser.parse(message.text)
+        except SignalParseError:
+            # Not a signal, ignore
             return
         
-        # Get the signal from database
-        signal_data = await self.db.get_signal(signal_id)
-        if not signal_data:
-            await query.edit_message_text(
-                f"❌ Signal `{signal_id}` not found or expired.",
-                parse_mode="Markdown"
-            )
-            return
+        logger.info(f"Signal received from channel: {signal.signal_id}")
         
-        # Reconstruct Signal object
-        from .signal_parser import Signal, SignalType, OrderType
-        from datetime import datetime
-        signal = Signal(
-            signal_id=signal_data["signal_id"],
-            symbol=signal_data["symbol"],
-            signal_type=SignalType(signal_data["signal_type"]),
-            order_type=OrderType(signal_data["order_type"]),
-            entry_price=signal_data.get("entry_price"),
-            stop_loss=signal_data.get("stop_loss"),
-            take_profit=signal_data.get("take_profit"),
-            leverage=signal_data.get("leverage", 1),
-            raw_message="",  # Not stored in DB, not needed for execution
-            timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
-        )
-        
-        # Update message to show processing
-        await query.edit_message_text(
-            f"⏳ **Executing trade...**\n\n"
-            f"Signal: `{signal_id}`",
-            parse_mode="Markdown"
-        )
-        
-        # Execute the trade
-        result = await self.broadcaster.execute_single_trade(signal, subscriber)
-        
-        # Notify user of result
-        notification = format_user_trade_notification(signal, result)
-        await query.edit_message_text(notification, parse_mode="Markdown")
+        # Broadcast to all subscribers
+        await self._broadcast_signal(signal, message.chat_id)
     
-    async def _execute_with_balance(self, query, signal_id: str, user_id: int, amount: float):
-        """Execute a trade with a specific amount (for reduced balance flow)."""
-        # Get subscriber
-        subscriber = await self.db.get_subscriber(user_id)
-        if not subscriber or not subscriber.is_active:
-            await query.edit_message_text("❌ You're not registered anymore.")
+    async def handle_admin_dm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle DM from admin - can also trigger signals."""
+        message = update.message
+        if not message or not message.text:
             return
         
-        # Get the signal from database
-        signal_data = await self.db.get_signal(signal_id)
-        if not signal_data:
-            await query.edit_message_text(
-                f"❌ Signal `{signal_id}` not found or expired.",
-                parse_mode="Markdown"
-            )
+        # Log what we're checking
+        logger.info(f"Signal check - chat_id: {message.chat_id}, user_id: {update.effective_user.id}, is_channel: {message.chat.type == 'channel'}, is_admin_dm: {self._is_admin(update.effective_user.id)}")
+        
+        # Only process from admin
+        if not self._is_admin(update.effective_user.id):
             return
         
-        # Reconstruct Signal object
-        from .signal_parser import Signal, SignalType, OrderType
-        from datetime import datetime
-        signal = Signal(
-            signal_id=signal_data["signal_id"],
-            symbol=signal_data["symbol"],
-            signal_type=SignalType(signal_data["signal_type"]),
-            order_type=OrderType(signal_data["order_type"]),
-            entry_price=signal_data.get("entry_price"),
-            stop_loss=signal_data.get("stop_loss"),
-            take_profit=signal_data.get("take_profit"),
-            leverage=signal_data.get("leverage", 1),
-            raw_message="",
-            timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
-        )
+        # Try to parse as signal
+        try:
+            signal = SignalParser.parse(message.text)
+        except SignalParseError:
+            # Not a signal, ignore (let other handlers deal with it)
+            return
         
-        # Update message to show processing
-        await query.edit_message_text(
-            f"⏳ **Executing trade with ${amount:.2f}...**\n\n"
-            f"Signal: `{signal_id}`",
-            parse_mode="Markdown"
-        )
+        logger.info(f"Signal received from admin DM: {signal.signal_id}")
         
-        # Execute the trade with override amount
-        result = await self.broadcaster.execute_with_amount(signal, subscriber, amount)
-        
-        # Notify user of result
-        notification = format_user_trade_notification(signal, result)
-        await query.edit_message_text(notification, parse_mode="Markdown")
-    
-    async def _handle_close_signal(self, message, close: SignalClose):
-        """Handle a close signal from admin."""
-        await self.broadcaster.broadcast_close(close)
+        # Confirm to admin
         await message.reply_text(
-            f"✅ Signal `{close.signal_id}` marked as closed.\n\n"
-            f"Subscribers have been notified.",
-            parse_mode="Markdown"
+            f"📡 Signal detected!\n\n"
+            f"{format_signal_summary(signal)}\n\n"
+            f"Broadcasting to all AUTO subscribers..."
         )
+        
+        # Broadcast to all subscribers
+        await self._broadcast_signal(signal, message.chat_id)
     
-    # ==================== Channel Signal Command ====================
-    
-    async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle /signal command from channel admins.
+    async def _broadcast_signal(self, signal: Signal, source_chat_id: int):
+        """Broadcast a signal to all subscribers."""
+        # Execute trades for AUTO subscribers
+        results = await self.broadcaster.broadcast_signal(signal)
         
-        Only works in the designated signal channel.
-        Any admin of that channel can post signals.
-        
-        Format:
-        /signal 
-        XRPUSDT
-        LONG
-        Entry: 2.01
-        TP: 2.10
-        SL: 1.95
-        Lev: 10x
-        """
-        message = update.message or update.channel_post
-        if not message:
-            return
-        
-        chat_id = message.chat.id
-        
-        # Only allow in the signal channel
-        if not self._is_signal_channel(chat_id):
-            # Silently ignore if not in signal channel
-            return
-        
-        # Get the text after /signal
-        if not message.text:
-            await message.reply_text(
-                "📡 **Signal Command**\n\n"
-                "Format:\n"
-                "```\n"
-                "/signal \n"
-                "XRPUSDT\n"
-                "LONG\n"
-                "Entry: 2.01\n"
-                "TP: 2.10\n"
-                "SL: 1.95\n"
-                "Lev: 10x\n"
-                "```",
-                parse_mode="Markdown"
-            )
-            return
-        
-        # Extract signal text (everything after /signal on new lines)
-        signal_text = message.text
-        if signal_text.lower().startswith("/signal"):
-            signal_text = signal_text[7:].strip()  # Remove "/signal"
-        
-        if not signal_text:
-            await message.reply_text(
-                "📡 **Signal Command**\n\n"
-                "Format:\n"
-                "```\n"
-                "/signal \n"
-                "XRPUSDT\n"
-                "LONG\n"
-                "Entry: 2.01\n"
-                "TP: 2.10\n"
-                "SL: 1.95\n"
-                "Lev: 10x\n"
-                "```",
-                parse_mode="Markdown"
-            )
-            return
-        
+        # Send summary to admin
+        summary = format_broadcast_summary(signal, results)
         try:
-            parsed = SignalParser.parse(signal_text)
-            
-            if parsed is None:
-                await message.reply_text(
-                    "⚠️ Could not parse signal. Check the format:\n\n"
-                    "```\n"
-                    "/signal \n"
-                    "BTCUSDT\n"
-                    "LONG\n"
-                    "Entry: 95000\n"
-                    "TP: 98000\n"
-                    "SL: 93000\n"
-                    "Lev: 20x\n"
-                    "```",
+            await self.bot.send_message(
+                chat_id=self.settings.admin_telegram_id,
+                text=summary,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send broadcast summary to admin: {e}")
+        
+        # Notify each user of their trade result
+        for result in results:
+            notification = format_user_trade_notification(signal, result)
+            try:
+                await self.bot.send_message(
+                    chat_id=result.telegram_id,
+                    text=notification,
                     parse_mode="Markdown"
                 )
-                return
-            
-            if isinstance(parsed, Signal):
-                await self._handle_new_signal(message, parsed)
-            elif isinstance(parsed, SignalClose):
-                await self._handle_close_signal(message, parsed)
-            else:
-                await message.reply_text("⚠️ Unknown signal type parsed.")
-                
-        except SignalParseError as e:
-            await message.reply_text(f"⚠️ Signal parse error: {e}")
-        except Exception as e:
-            logger.exception(f"Error processing /signal command: {e}")
-            await message.reply_text(f"❌ Error processing signal: {e}")
+            except Exception as e:
+                logger.error(f"Failed to notify user {result.telegram_id}: {e}")
     
     # ==================== Bot Setup ====================
     
-    async def _post_init(self, application: Application):
-        """Called after Application.initialize() - connect database."""
-        logger.info("Initializing database connection...")
-        await self.db.connect()
-        logger.info("Database connected successfully")
-    
-    async def _post_shutdown(self, application: Application):
-        """Called after Application.shutdown() - close database."""
-        logger.info("Closing database connection...")
-        await self.db.close()
-        logger.info("Database closed")
-    
-    def build_application(self) -> Application:
-        """Build the Telegram application."""
-        self.app = (
-            Application.builder()
-            .token(self.settings.telegram_bot_token)
-            .post_init(self._post_init)
-            .post_shutdown(self._post_shutdown)
-            .build()
-        )
+    async def setup(self, webhook_url: Optional[str] = None):
+        """Set up the bot with handlers."""
+        builder = Application.builder().token(self.settings.telegram_bot_token)
+        self.app = builder.build()
         self.bot = self.app.bot
         
         # Registration conversation handler
@@ -967,14 +664,14 @@ Would you like to execute this trade with your available balance instead?
             entry_points=[CommandHandler("register", self.register_start)],
             states={
                 AWAITING_API_KEY: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.register_api_key)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.register_api_key),
                 ],
                 AWAITING_API_SECRET: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.register_api_secret)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.register_api_secret),
                 ],
                 AWAITING_AMOUNT: [
-                    CommandHandler("skip", self.register_skip_amount),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.register_amount),
+                    CommandHandler("skip", self.register_skip_amount),
                 ],
             },
             fallbacks=[CommandHandler("cancel", self.register_cancel)],
@@ -988,40 +685,34 @@ Would you like to execute this trade with your available balance instead?
         self.app.add_handler(CommandHandler("setleverage", self.setleverage_command))
         self.app.add_handler(CommandHandler("setmode", self.setmode_command))
         self.app.add_handler(CommandHandler("unregister", self.unregister_command))
-        self.app.add_handler(CommandHandler("adminstats", self.admin_stats_command))
         
-        # /signal command - use MessageHandler with Regex for channel posts
-        # CommandHandler doesn't work for channel posts
+        # Admin commands
+        self.app.add_handler(CommandHandler("stats", self.admin_stats_command))
+        self.app.add_handler(CommandHandler("broadcast", self.admin_broadcast_command))
+        
+        # Channel message handler (for signals)
         self.app.add_handler(MessageHandler(
-            filters.Regex(r'^/signal') & filters.ChatType.CHANNEL,
-            self.signal_command
+            filters.UpdateType.CHANNEL_POST,
+            self.handle_channel_message
         ))
         
-        # Callback handler for inline button presses (manual trade confirmations)
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
-        
-        # Signal handlers - for both private messages and channel posts
-        # Use group=1 so command handlers (group=0 by default) are processed first
+        # Admin DM handler (for testing signals)
         self.app.add_handler(MessageHandler(
-            filters.TEXT & (filters.ChatType.PRIVATE | filters.ChatType.CHANNEL),
-            self.handle_signal_message
-        ), group=1)
+            filters.TEXT & filters.ChatType.PRIVATE,
+            self.handle_admin_dm
+        ))
         
-        return self.app
-    
-    async def setup_webhook(self):
-        """Set up webhook for Telegram."""
-        webhook_url = self.settings.full_webhook_url
-        
+        # Set webhook if URL provided
         if webhook_url:
             await self.bot.set_webhook(url=webhook_url)
             logger.info(f"Webhook set: {webhook_url}")
-        else:
-            logger.warning("No webhook URL configured, will use polling")
+        
+        return self.app
     
-    def run_polling(self):
-        """Run bot with polling (for local development)."""
-        logger.info("Starting bot in polling mode...")
-        self.build_application()
-        self.app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    async def process_update(self, update_data: dict):
+        """Process an incoming update from webhook."""
+        if not self.app:
+            raise RuntimeError("Bot not set up. Call setup() first.")
+        
+        update = Update.de_json(update_data, self.bot)
+        await self.app.process_update(update)
