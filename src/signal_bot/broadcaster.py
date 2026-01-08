@@ -286,6 +286,36 @@ class SignalBroadcaster:
             
             logger.info(f"Calculated quantity: {qty} (actual value: ${actual_value:.2f}) for ${trade_amount} at price {price}")
             
+            # Enforce minimum order value of $8 (heuristic based on fees + exchange min)
+            MIN_ORDER_VALUE = 8.0
+            if actual_value < MIN_ORDER_VALUE:
+                logger.info(f"Order value ${actual_value:.2f} is below minimum ${MIN_ORDER_VALUE}. Adjusting...")
+                
+                # Recalculate quantity for minimal allowed value
+                # We reuse calculate_order_from_usd to handle quantity steps correctly
+                qty, actual_value = calculate_order_from_usd(
+                    usd_amount=MIN_ORDER_VALUE,
+                    price=price,
+                    quantity_step=float(asset.quantity_step),
+                )
+                
+                # Check if user has enough balance for this increase
+                required_margin = actual_value / leverage
+                
+                # Add a small buffer (1%) for fees coverage
+                if required_margin * 1.01 > balance:
+                     return TradeResult(
+                        subscriber_id=subscriber.telegram_id,
+                        username=subscriber.username,
+                        status=TradeStatus.INSUFFICIENT_BALANCE,
+                        message=f"Balance ${balance:.2f} too low for min order val ${actual_value:.2f} (Req Margin: ~${required_margin:.2f})",
+                        side=signal.signal_type.value,
+                        order_type=signal.order_type.value,
+                        available_balance=balance,
+                    )
+                
+                logger.info(f"Adjusted to {qty} {signal.symbol} (${actual_value:.2f}) to meet minimum value")
+            
             # Validate against min/max
             min_qty = float(asset.min_quantity)
             max_qty = float(asset.max_quantity)
