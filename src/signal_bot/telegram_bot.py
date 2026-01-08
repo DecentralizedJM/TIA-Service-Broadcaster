@@ -501,7 +501,8 @@ class SignalBot:
             await update.message.reply_text(
                 "🤖 **Trade mode set to AUTO**\n\n"
                 "Trades will be executed automatically when signals are published.\n\n"
-                "⚠️ Make sure you trust the signal source!",
+                "Trades are professionally managed by the Mudrex Research Desk using your live funds. "
+                "Trading carries inherent risk; please trade responsibly.",
                 parse_mode="Markdown"
             )
         else:
