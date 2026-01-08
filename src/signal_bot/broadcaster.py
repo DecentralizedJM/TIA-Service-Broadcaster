@@ -10,6 +10,7 @@ This is the core of the centralized system:
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple
@@ -49,6 +50,16 @@ class TradeResult:
     entry_price: Optional[float] = None
     # For insufficient balance flow
     available_balance: Optional[float] = None
+
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Telegram Markdown."""
+    # Characters that need escaping in Markdown: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    # For basic Markdown (not MarkdownV2), we mainly need to escape * and _
+    escape_chars = ['*', '_', '`', '[']
+    for char in escape_chars:
+        text = text.replace(char, '\\' + char)
+    return text
 
 
 class SignalBroadcaster:
@@ -207,7 +218,7 @@ class SignalBroadcaster:
                         subscriber_id=subscriber.telegram_id,
                         username=subscriber.username,
                         status=TradeStatus.INSUFFICIENT_BALANCE,
-                        message=f"Balance too low: {balance:.2f} USDT (min $1 required)",
+                        message=f"Balance too low: {balance:.2f} USDT (min 1 required)",
                         side=signal.signal_type.value,
                         order_type=signal.order_type.value,
                         available_balance=balance,
@@ -265,7 +276,7 @@ class SignalBroadcaster:
                     subscriber_id=subscriber.telegram_id,
                     username=subscriber.username,
                     status=TradeStatus.API_ERROR,
-                    message=f"Trade value ${actual_value:.2f} is below minimum ${MIN_NOTIONAL_USDT:.0f}. Use /setamount to increase (currently ${subscriber.trade_amount_usdt:.2f}).",
+                    message=f"Trade value {actual_value:.2f} USD is below minimum {MIN_NOTIONAL_USDT:.0f} USD. Use /setamount to increase (currently {subscriber.trade_amount_usdt:.2f} USD).",
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                 )
@@ -350,7 +361,7 @@ class SignalBroadcaster:
             msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
             if signal.stop_loss or signal.take_profit:
                 if sl_tp_set:
-                    msg += " | SL/TP set ✓"
+                    msg += " | SL/TP set"
                 else:
                     msg += f" | SL/TP failed: {sl_tp_error}" if sl_tp_error else " | No position for SL/TP"
             
@@ -455,28 +466,30 @@ def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_
     
     manual_line = f"\n👆 Manual (awaiting): {manual_count}" if manual_count > 0 else ""
     
-    # Add error details for debugging
+    # Add error details for debugging (without Markdown formatting to avoid parse errors)
     error_details = ""
     failed_results = [r for r in results if r.status in (TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND)]
     if failed_results:
-        error_details = "\n\n**Errors:**\n"
+        error_details = "\n\nErrors:\n"
         for r in failed_results[:3]:  # Show max 3 errors
-            safe_msg = r.message[:100] if r.message else "Unknown error"
-            error_details += f"• @{r.username or r.subscriber_id}: {safe_msg}\n"
+            # Clean the message of any special characters that could break Markdown
+            safe_msg = r.message[:80] if r.message else "Unknown error"
+            safe_msg = safe_msg.replace('*', '').replace('_', '').replace('`', '').replace('[', '(').replace(']', ')')
+            user_id = r.username or str(r.subscriber_id)
+            error_details += f"- {user_id}: {safe_msg}\n"
     
-    return f"""
-📡 **Signal Broadcast Complete**
+    # Use simple formatting to avoid Markdown parse errors
+    return f"""📡 Signal Broadcast Complete
 ━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
+🆔 Signal: {signal.signal_id}
 📊 {signal.signal_type.value} {signal.symbol}
 
-**Results:**
+Results:
 ✅ Success: {success}
 💰 Insufficient Balance: {insufficient}
 ❌ Failed: {failed}{manual_line}{error_details}
 ━━━━━━━━━━━━━━━━━━━━
-Total: {len(results) + manual_count} subscribers
-""".strip()
+Total: {len(results) + manual_count} subscribers"""
 
 
 def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
@@ -484,51 +497,43 @@ def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
     if result.status == TradeStatus.SUCCESS:
         qty_info = f"\n📦 Quantity: {result.quantity}" if result.quantity else ""
         value_info = f" (~${result.actual_value:.2f})" if result.actual_value else ""
-        return f"""
-✅ **Trade Executed**
+        return f"""✅ Trade Executed
 ━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
+🆔 Signal: {signal.signal_id}
 📊 {signal.signal_type.value} {signal.symbol}
 📋 {signal.order_type.value}{qty_info}{value_info}
 🛑 SL: {signal.stop_loss or "Not set"}
 🎯 TP: {signal.take_profit or "Not set"}
 ⚡ Leverage: {signal.leverage}x
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
+━━━━━━━━━━━━━━━━━━━━"""
     
     elif result.status == TradeStatus.INSUFFICIENT_BALANCE:
-        return f"""
-💰 **Trade Skipped - Insufficient Balance**
+        return f"""💰 Insufficient Balance
 ━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
+🆔 Signal: {signal.signal_id}
 📊 {signal.signal_type.value} {signal.symbol}
 
 {result.message}
 
-Top up your Mudrex wallet to receive future signals.
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
+Use /setamount to adjust your trade size.
+━━━━━━━━━━━━━━━━━━━━"""
     
     elif result.status == TradeStatus.SYMBOL_NOT_FOUND:
-        return f"""
-⚠️ **Trade Failed - Symbol Not Found**
+        return f"""❌ Symbol Not Found
 ━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
-📊 {signal.signal_type.value} {signal.symbol}
+🆔 Signal: {signal.signal_id}
+📊 {signal.symbol}
 
-The symbol `{signal.symbol}` is not available on Mudrex Futures.
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
+This trading pair is not available on Mudrex.
+━━━━━━━━━━━━━━━━━━━━"""
     
     else:
-        # Escape special characters in error message for Markdown
-        safe_message = result.message.replace('|', '\\|').replace('_', '\\_').replace('*', '\\*')
-        return f"""
-❌ **Trade Failed**
+        # API_ERROR or other
+        safe_msg = result.message[:150] if result.message else "Unknown error"
+        return f"""❌ Trade Failed
 ━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
+🆔 Signal: {signal.signal_id}
 📊 {signal.signal_type.value} {signal.symbol}
 
-Error: {safe_message}
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
+Error: {safe_msg}
+━━━━━━━━━━━━━━━━━━━━"""
