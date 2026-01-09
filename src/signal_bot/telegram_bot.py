@@ -747,7 +747,7 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
 🆔 Signal: `{signal.signal_id}`
 📊 {signal.signal_type.value} **{signal.symbol}**
 
-Your configured amount: **${result.message.split('Requested: ')[1].split(' USDT')[0]} USDT**
+Your configured amount exceeds your balance.
 Available balance: **${available:.2f} USDT**
 
 Would you like to execute this trade with your available balance instead?
@@ -769,6 +769,8 @@ Would you like to execute this trade with your available balance instead?
         await query.answer()  # Acknowledge the button press
         
         data = query.data
+        if not data:
+            return
         user_id = query.from_user.id
         
         # Parse callback data formats:

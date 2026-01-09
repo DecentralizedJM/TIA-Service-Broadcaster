@@ -30,7 +30,7 @@ for var in required_vars:
     if value:
         # Mask sensitive values
         if "TOKEN" in var or "SECRET" in var:
-            print(f"✅ {var} = {value[:10]}...{value[-4:] if len(value) > 14 else ''}")
+            print(f"✅ {var} = [SET]")
         else:
             print(f"✅ {var} = {value}")
     else:

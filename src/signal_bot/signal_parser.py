@@ -14,6 +14,7 @@ Update/Close Commands:
 """
 
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -131,11 +132,12 @@ class SignalParser:
         """
         Generate a unique signal ID.
         
-        Format: SIG-DDMMYY-SYMBOL
-        Example: SIG-030126-BTCUSDT
+        Format: SIG-DDMMYY-SYMBOL-UUID
+        Example: SIG-030126-BTCUSDT-A1B2C3
         """
         date_str = datetime.now().strftime("%d%m%y")
-        return f"SIG-{date_str}-{symbol.upper()}"
+        unique_suffix = uuid.uuid4().hex[:6].upper()
+        return f"SIG-{date_str}-{symbol.upper()}-{unique_suffix}"
     
     @classmethod
     def _extract_param(cls, text: str, param_name: str) -> Optional[float]:

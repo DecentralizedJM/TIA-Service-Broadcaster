@@ -441,7 +441,7 @@ class SignalBroadcaster:
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                     entry_price=signal.entry_price or 0.0,
-                    available_balance=available_balance,
+                    available_balance=balance,
                 )
 
             # 2. Check for Symbol Not Found
