@@ -141,7 +141,11 @@ class SignalBot:
             f"✅ Status: Active",
             parse_mode="Markdown"
         )
-    
+    async def chatid_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Get the current chat ID (helper for setup)."""
+        chat_id = update.effective_chat.id
+        await update.message.reply_text(f"🆔 Chat ID: `{chat_id}`", parse_mode="Markdown")
+
     # ==================== Registration Flow ====================
     
     async def register_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1082,21 +1086,22 @@ Would you like to execute this trade with your available balance instead?
         self.app.add_handler(CommandHandler("setmode", self.setmode_command))
         self.app.add_handler(CommandHandler("unregister", self.unregister_command))
         self.app.add_handler(CommandHandler("adminstats", self.admin_stats_command))
+        self.app.add_handler(CommandHandler("chatid", self.chatid_command))
         
-        # /signal command - use MessageHandler with Regex for channel posts
-        # CommandHandler doesn't work for channel posts
+        # /signal command - use MessageHandler with Regex for channel/group posts
+        # CommandHandler doesn't work for channel posts, and we want unified handling
         self.app.add_handler(MessageHandler(
-            filters.Regex(r'^/signal') & filters.ChatType.CHANNEL,
+            filters.Regex(r'^/signal') & (filters.ChatType.CHANNEL | filters.ChatType.GROUPS),
             self.signal_command
         ))
         
         # Callback handler for inline button presses (manual trade confirmations)
         self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
         
-        # Signal handlers - for both private messages and channel posts
+        # Signal handlers - for both private messages, channel posts, and groups
         # Use group=1 so command handlers (group=0 by default) are processed first
         self.app.add_handler(MessageHandler(
-            filters.TEXT & (filters.ChatType.PRIVATE | filters.ChatType.CHANNEL),
+            filters.TEXT & (filters.ChatType.PRIVATE | filters.ChatType.CHANNEL | filters.ChatType.GROUPS),
             self.handle_signal_message
         ), group=1)
         
