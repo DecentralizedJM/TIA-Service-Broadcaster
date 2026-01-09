@@ -58,6 +58,7 @@ class SignalUpdate:
 class SignalClose:
     """Close signal command."""
     signal_id: str
+    symbol: str  # Extracted from signal_id
     partial_percent: Optional[float] = None  # None = close 100%
 
 
@@ -264,7 +265,11 @@ class SignalParser:
         """
         match = cls.CLOSE_PATTERN.match(message.strip())
         if match:
-            return SignalClose(signal_id=match.group(1).upper())
+            signal_id = match.group(1).upper()
+            symbol = cls.extract_symbol_from_id(signal_id)
+            if not symbol:
+                return None
+            return SignalClose(signal_id=signal_id, symbol=symbol)
         return None
     
     @classmethod
@@ -278,8 +283,13 @@ class SignalParser:
         match = cls.PARTIAL_PATTERN.match(message.strip())
         if match:
             percent = float(match.group(2))
+            signal_id = match.group(1).upper()
+            symbol = cls.extract_symbol_from_id(signal_id)
+            if not symbol:
+                return None
             return SignalClose(
-                signal_id=match.group(1).upper(),
+                signal_id=signal_id,
+                symbol=symbol,
                 partial_percent=percent
             )
         return None
