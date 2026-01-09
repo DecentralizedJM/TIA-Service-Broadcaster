@@ -29,6 +29,7 @@ from .signal_parser import (
     Signal,
     SignalUpdate,
     SignalClose,
+    SignalLeverage,
     SignalParseError,
     format_signal_summary,
 )
@@ -580,6 +581,8 @@ class SignalBot:
                 await self._handle_new_signal(message, parsed)
             elif isinstance(parsed, SignalClose):
                 await self._handle_close_signal(message, parsed)
+            elif isinstance(parsed, SignalLeverage):
+                await self._handle_leverage_signal(message, parsed)
                 
         except SignalParseError as e:
             await message.reply_text(f"⚠️ Signal parse error: {e}")
@@ -881,6 +884,50 @@ Would you like to execute this trade with your available balance instead?
                  )
              except Exception as e:
                  logger.error(f"Failed to notify close to {result.subscriber_id}: {e}")
+    
+    async def _handle_leverage_signal(self, message, lev: SignalLeverage):
+        """Handle a leverage update signal."""
+        results = await self.broadcaster.broadcast_leverage(lev)
+        
+        # Notify Admin
+        success_count = sum(1 for r in results if r.status == TradeStatus.SUCCESS)
+        skipped_count = sum(1 for r in results if r.status == TradeStatus.SKIPPED)
+        failed_count = sum(1 for r in results if r.status == TradeStatus.API_ERROR)
+        
+        await message.reply_text(
+             f"⚡ Signal `{lev.signal_id}` Leverage Update\n"
+             f"━━━━━━━━━━━━━━━━━━━━\n"
+             f"✅ Success: {success_count}\n"
+             f"⏭️ Skipped: {skipped_count}\n"
+             f"❌ Failed: {failed_count}",
+             parse_mode="Markdown"
+        )
+        
+        # Notify Users
+        for result in results:
+             if result.status == TradeStatus.SKIPPED:
+                 continue
+             
+             notification = f"⚡ **Leverage Updated**\n" \
+                            f"━━━━━━━━━━━━━━━━━━━━\n" \
+                            f"🆔 Signal: `{lev.signal_id}`\n" \
+                            f"📊 {lev.symbol} → {lev.leverage}x\n\n"
+                            
+             if result.status == TradeStatus.SUCCESS:
+                 notification += f"✅ Leverage set to {lev.leverage}x\n"
+             else:
+                 notification += f"❌ Update Failed: {result.message}\n"
+             
+             notification += "━━━━━━━━━━━━━━━━━━━━"
+             
+             try:
+                 await self.bot.send_message(
+                     chat_id=result.subscriber_id,
+                     text=notification,
+                     parse_mode="Markdown"
+                 )
+             except Exception as e:
+                 logger.error(f"Failed to notify leverage update to {result.subscriber_id}: {e}")
     
     # ==================== Channel Signal Command ====================
     

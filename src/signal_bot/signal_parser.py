@@ -62,6 +62,14 @@ class SignalClose:
     partial_percent: Optional[float] = None  # None = close 100%
 
 
+@dataclass
+class SignalLeverage:
+    """Leverage update command."""
+    signal_id: str
+    symbol: str
+    leverage: int
+
+
 class SignalParseError(Exception):
     """Raised when signal parsing fails."""
     pass
@@ -96,7 +104,12 @@ class SignalParser:
     )
     
     CLOSE_PATTERN = re.compile(
-        rf"/close\s+({SIGNAL_ID_PATTERN})",
+        rf"/close\s+({SIGNAL_ID_PATTERN})(?:\s+(\d+(?:\.\d+)?)%?)?",
+        re.IGNORECASE
+    )
+    
+    LEVERAGE_PATTERN = re.compile(
+        rf"/leverage\s+({SIGNAL_ID_PATTERN})\s+(\d+)x?",
         re.IGNORECASE
     )
     
@@ -267,9 +280,16 @@ class SignalParser:
         if match:
             signal_id = match.group(1).upper()
             symbol = cls.extract_symbol_from_id(signal_id)
+            percent = float(match.group(2)) if match.group(2) else None
+            
             if not symbol:
                 return None
-            return SignalClose(signal_id=signal_id, symbol=symbol)
+                
+            return SignalClose(
+                signal_id=signal_id, 
+                symbol=symbol,
+                partial_percent=percent
+            )
         return None
     
     @classmethod
@@ -291,6 +311,30 @@ class SignalParser:
                 signal_id=signal_id,
                 symbol=symbol,
                 partial_percent=percent
+            )
+        return None
+
+    @classmethod
+    def parse_leverage(cls, message: str) -> Optional[SignalLeverage]:
+        """
+        Parse a /leverage command.
+        
+        Example:
+            /leverage SIG-090126-XRPUSDT 10x
+        """
+        match = cls.LEVERAGE_PATTERN.match(message.strip())
+        if match:
+            signal_id = match.group(1).upper()
+            leverage = int(match.group(2))
+            symbol = cls.extract_symbol_from_id(signal_id)
+            
+            if not symbol:
+                return None
+                
+            return SignalLeverage(
+                signal_id=signal_id,
+                symbol=symbol,
+                leverage=leverage
             )
         return None
     
@@ -325,6 +369,8 @@ class SignalParser:
             return cls.parse_close(message)
         elif message.lower().startswith('/partial'):
             return cls.parse_partial(message)
+        elif message.lower().startswith('/leverage'):
+            return cls.parse_leverage(message)
         
         # Try to parse as multi-line signal (no /signal prefix)
         # This supports:

@@ -20,7 +20,7 @@ from mudrex.exceptions import MudrexAPIError
 from mudrex.utils import calculate_order_from_usd
 
 from .database import Database, Subscriber
-from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose
+from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose, SignalLeverage
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +607,69 @@ class SignalBroadcaster:
         results = await asyncio.gather(*tasks)
         
         await self.db.close_signal(close.signal_id)
+        
+        return results
+    
+    async def broadcast_leverage(self, lev: SignalLeverage) -> List[TradeResult]:
+        """
+        Broadcast a leverage update to all subscribers.
+        """
+        logger.info(f"Broadcasting leverage update for {lev.signal_id} to {lev.leverage}x")
+        
+        active_subscribers = await self.db.get_active_subscribers()
+        
+        async def _update_leverage_for_subscriber(subscriber: Subscriber) -> TradeResult:
+            if subscriber.trade_mode != 'AUTO':
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SKIPPED,
+                    message="Manual mode",
+                    side="LEVERAGE",
+                    order_type="UPDATE"
+                )
+
+            try:
+                client = MudrexClient(api_secret=subscriber.api_secret)
+                
+                # Update Leverage
+                await asyncio.to_thread(
+                    client.leverage.set,
+                    symbol=lev.symbol,
+                    leverage=str(lev.leverage),
+                    margin_type="ISOLATED"
+                )
+                
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SUCCESS,
+                    message=f"Leverage updated to {lev.leverage}x",
+                    side="LEVERAGE",
+                    order_type="UPDATE"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to update leverage for {subscriber.telegram_id}: {e}")
+                
+                 # Sanitize error
+                error_msg = str(e).lower()
+                if "invalid" in error_msg or "leverage" in error_msg:
+                    safe_msg = "Invalid leverage for this pair"
+                else:
+                    safe_msg = f"Error: {str(e)[:100]}"
+                
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.API_ERROR,
+                    message=safe_msg,
+                    side="LEVERAGE",
+                    order_type="UPDATE"
+                )
+
+        tasks = [_update_leverage_for_subscriber(sub) for sub in active_subscribers]
+        results = await asyncio.gather(*tasks)
         
         return results
     
