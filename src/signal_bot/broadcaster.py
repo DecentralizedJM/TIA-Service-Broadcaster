@@ -431,12 +431,15 @@ class SignalBroadcaster:
             logger.error(f"  Full error: {repr(e)}")
             
             # Check for insufficient balance in API error
-            if "insufficient balance" in error_msg.lower() or "not enough balance" in error_msg.lower():
+            msg_lower = error_msg.lower()
+            if (("insufficient" in msg_lower and ("balance" in msg_lower or "margin" in msg_lower or "fund" in msg_lower)) or 
+                "not enough" in msg_lower or
+                "balance" in msg_lower and "low" in msg_lower):
                 return TradeResult(
                     subscriber_id=subscriber.telegram_id,
                     username=subscriber.username,
                     status=TradeStatus.INSUFFICIENT_BALANCE,
-                    message=f"Insufficient balance in Mudrex Futures wallet",
+                    message=f"Insufficient balance/margin for trade",
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                     entry_price=signal.entry_price or 0.0,
