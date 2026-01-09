@@ -364,7 +364,7 @@ class SignalBroadcaster:
                     subscriber_id=subscriber.telegram_id,
                     username=subscriber.username,
                     status=TradeStatus.API_ERROR,
-                    message=f"Calculated quantity is 0 - amount too low",
+                    message=f"Calculated quantity is 0 - amount too low. Please add funds to your futures wallet.",
                     side=signal.signal_type.value,
                     order_type=signal.order_type.value,
                 )
