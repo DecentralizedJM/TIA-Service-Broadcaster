@@ -420,18 +420,16 @@ class SignalBroadcaster:
             )
             
         except MudrexAPIError as e:
-            # Extract more details from the API error
+            # Extract error details
             error_msg = str(e)
+            msg_lower = error_msg.lower()
             error_code = getattr(e, 'code', 'UNKNOWN')
             status_code = getattr(e, 'status_code', 0)
-            request_id = getattr(e, 'request_id', None)
             
             logger.error(f"Mudrex API error for {subscriber.telegram_id}: {error_msg}")
-            logger.error(f"  Error code: {error_code}, Status: {status_code}, Request ID: {request_id}")
             logger.error(f"  Full error: {repr(e)}")
             
-            # Check for insufficient balance in API error
-            msg_lower = error_msg.lower()
+            # 1. Check for Insufficient Balance
             if (("insufficient" in msg_lower and ("balance" in msg_lower or "margin" in msg_lower or "fund" in msg_lower)) or 
                 "not enough" in msg_lower or
                 "balance" in msg_lower and "low" in msg_lower):
@@ -446,14 +444,37 @@ class SignalBroadcaster:
                     available_balance=available_balance,
                 )
 
-            # Include more context in the error message
-            detailed_msg = f"Mudrex API error: {e.message if hasattr(e, 'message') else error_msg} | Code: {error_code} | Status: {status_code}"
+            # 2. Check for Symbol Not Found
+            if status_code == 404 or "symbol" in msg_lower or "pair" in msg_lower or "not found" in msg_lower:
+                 return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SYMBOL_NOT_FOUND,
+                    message="Coin pair not supported on Mudrex",
+                    side=signal.signal_type.value,
+                    order_type=signal.order_type.value,
+                )
+
+            # 3. Sanitize Common Errors
+            readable_msg = f"Trade failed (Code: {status_code})"
+            
+            if status_code in (401, 403) or "unauthorized" in msg_lower or "forbidden" in msg_lower or "api key" in msg_lower:
+                 readable_msg = "Invalid API Key or Permissions. Please /register again."
+            elif "order value" in msg_lower or "too small" in msg_lower or "minimum" in msg_lower:
+                 readable_msg = "Order value too low (Minimum ~$5 required)."
+            elif "leverage" in msg_lower:
+                 readable_msg = "Invalid leverage setting for this pair."
+            else:
+                 # Default: Clean up the raw message
+                 raw = e.message if hasattr(e, 'message') else error_msg
+                 # Remove typical API prefix junk if possible, but keep it informative
+                 readable_msg = f"Error: {raw[:100]}"
             
             return TradeResult(
                 subscriber_id=subscriber.telegram_id,
                 username=subscriber.username,
                 status=TradeStatus.API_ERROR,
-                message=detailed_msg,
+                message=readable_msg,
                 side=signal.signal_type.value,
                 order_type=signal.order_type.value,
             )
@@ -706,5 +727,5 @@ This trading pair is not available on Mudrex.
 🆔 Signal: {signal.signal_id}
 📊 {signal.signal_type.value} {signal.symbol}
 
-Error: {safe_msg}
+{safe_msg}
 ━━━━━━━━━━━━━━━━━━━━"""
