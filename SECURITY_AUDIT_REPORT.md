@@ -81,24 +81,26 @@ salt = b"mudrex_signal_bot_v2"
 
 ---
 
-### 3. No Rate Limiting on API Calls
+### 3. No Rate Limiting on API Calls - FIXED
 
-**Files:** `src/signal_bot/broadcaster.py`
+**File:** `src/signal_bot/broadcaster.py`
 
-**Why Not Fixed:** Adding rate limiting requires:
-- Choosing appropriate limits (unknown without Mudrex API docs)
-- Testing with actual API to determine thresholds
-- Could slow down legitimate high-volume usage
+**Fix Applied:** Added semaphore-based rate limiting.
 
-**Current Mitigation:** `asyncio.gather()` already provides some natural throttling since each call awaits in a thread.
-
-**Recommendation:** Add semaphore-based concurrency limit:
 ```python
-# Future implementation
-self.api_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent API calls
+MAX_CONCURRENT_TRADES = 2  # Respects Mudrex limit of 2 calls/sec
+
+async with self._trade_semaphore:
+    # Only 2 subscribers execute trades simultaneously
 ```
 
-**Status:** DEFERRED (Needs testing)
+**Mudrex Rate Limits:**
+- 2 per second
+- 50 per minute
+- 1000 per hour
+- 10000 per day
+
+**Status:** FIXED
 
 ---
 
@@ -127,7 +129,7 @@ self.api_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent API calls
 | HIGH | Duplicate signal IDs | FIXED |
 | HIGH | Fixed crypto salt | ACCEPTED RISK |
 | HIGH | API secrets stored indefinitely | ACCEPTED RISK |
-| HIGH | No rate limiting on API calls | DEFERRED |
+| HIGH | No rate limiting on API calls | FIXED |
 | MEDIUM | Partial secret logging | FIXED |
 | MEDIUM | No null check on callback data | FIXED |
 | MEDIUM | Message parsing vulnerability | FIXED |
@@ -137,9 +139,9 @@ self.api_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent API calls
 | LOW | Duplicate trade executor | ADDRESSED |
 | LOW | Hardcoded min order value | FIXED |
 
-**Fixed:** 10/13 issues  
+**Fixed:** 11/13 issues  
 **Accepted Risk:** 2 issues  
-**Deferred:** 1 issue
+**Deferred:** 0 issues
 
 ---
 

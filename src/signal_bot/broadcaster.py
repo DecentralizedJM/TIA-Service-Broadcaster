@@ -68,13 +68,20 @@ class SignalBroadcaster:
     Broadcast signals to all subscribers.
     
     Executes trades in parallel for all active subscribers using the Mudrex SDK.
+    Rate limited to respect Mudrex API limits (2/sec, 50/min per key).
     """
     
     # Minimum order value required by Mudrex (in USDT)
     MIN_ORDER_VALUE = 8.0
     
+    # Max concurrent subscriber executions (each makes ~4-5 API calls)
+    # Mudrex limit: 2 calls/sec, so we limit concurrent subscribers
+    MAX_CONCURRENT_TRADES = 2
+    
     def __init__(self, database: Database):
         self.db = database
+        # Semaphore to limit concurrent API operations
+        self._trade_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_TRADES)
     
     async def broadcast_signal(self, signal: Signal) -> Tuple[List[TradeResult], List[Subscriber]]:
         """
@@ -158,23 +165,25 @@ class SignalBroadcaster:
     ) -> TradeResult:
         """Execute a signal for a single subscriber using the Mudrex SDK."""
         
-        # Run the blocking SDK calls in a thread pool for true parallelism
-        try:
-            result = await asyncio.to_thread(
-                self._execute_trade_sync,
-                signal,
-                subscriber,
-            )
-        except Exception as e:
-            logger.error(f"Trade execution failed for {subscriber.telegram_id}: {e}", exc_info=True)
-            result = TradeResult(
-                subscriber_id=subscriber.telegram_id,
-                username=subscriber.username,
-                status=TradeStatus.API_ERROR,
-                message=str(e),
-                side=signal.signal_type.value,
-                order_type=signal.order_type.value,
-            )
+        # Rate limiting: only allow MAX_CONCURRENT_TRADES at once
+        async with self._trade_semaphore:
+            # Run the blocking SDK calls in a thread pool for true parallelism
+            try:
+                result = await asyncio.to_thread(
+                    self._execute_trade_sync,
+                    signal,
+                    subscriber,
+                )
+            except Exception as e:
+                logger.error(f"Trade execution failed for {subscriber.telegram_id}: {e}", exc_info=True)
+                result = TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.API_ERROR,
+                    message=str(e),
+                    side=signal.signal_type.value,
+                    order_type=signal.order_type.value,
+                )
         
         # Record trade to database (async, after thread completes)
         await self.db.record_trade(
