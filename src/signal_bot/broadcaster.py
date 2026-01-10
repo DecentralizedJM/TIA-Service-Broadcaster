@@ -75,8 +75,9 @@ class SignalBroadcaster:
     MIN_ORDER_VALUE = 8.0
     
     # Max concurrent subscriber executions (each makes ~4-5 API calls)
-    # Mudrex limit: 2 calls/sec, so we limit concurrent subscribers
-    MAX_CONCURRENT_TRADES = 2
+    # Mudrex limits: 2/sec, 50/min - with 10 concurrent and ~0.5s per call, we stay safe
+    # For 500 subscribers: ~25-30 seconds total execution time
+    MAX_CONCURRENT_TRADES = 10
     
     def __init__(self, database: Database):
         self.db = database
