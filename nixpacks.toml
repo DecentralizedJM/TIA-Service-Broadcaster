@@ -1,3 +1,0 @@
-# Only override the start command, let Nixpacks auto-detect everything else
-[start]
-cmd = "python start.py"
