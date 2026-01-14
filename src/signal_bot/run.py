@@ -46,12 +46,17 @@ def print_banner():
 
 def run_webhook_server(settings: Settings):
     """Run the webhook server (production mode)."""
+    import os
     from .server import app
+    
+    # Railway sets PORT dynamically, use it if available, otherwise use settings
+    port = int(os.environ.get("PORT", settings.port))
+    host = os.environ.get("HOST", settings.host)
     
     uvicorn.run(
         app,
-        host=settings.host,
-        port=settings.port,
+        host=host,
+        port=port,
         log_level="info",
     )
 

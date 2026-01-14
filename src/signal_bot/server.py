@@ -84,12 +84,17 @@ app = FastAPI(
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    stats = await database.get_stats() if database else {}
+    try:
+        stats = await database.get_stats() if database else {}
+        subscribers = stats.get("active_subscribers", 0) if stats else 0
+    except Exception:
+        subscribers = 0
+    
     return {
         "status": "running",
         "bot": "Mudrex TradeIdeas Bot",
         "version": "2.0.0",
-        "subscribers": stats.get("active_subscribers", 0),
+        "subscribers": subscribers,
     }
 
 

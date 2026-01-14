@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     
     # Server
     host: str = Field("0.0.0.0", env="HOST")
-    port: int = Field(8000, env="PORT")
+    port: int = Field(8000, env="PORT")  # Railway sets PORT dynamically via $PORT
     
     # Database
     database_path: str = Field("subscribers.db", env="DATABASE_PATH")
