@@ -48,10 +48,9 @@ RUN mkdir -p /app/data
 # Expose port for Railway
 EXPOSE 8080
 
-# Health check - Railway sets PORT dynamically, use default 8080 for healthcheck
-# Note: Railway's healthcheck uses the port from railway.toml or service config
+# Health check - Use dynamic PORT environment variable (default 8080)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 # Default to webhook mode for Railway
 CMD ["python", "-m", "signal_bot.run"]
