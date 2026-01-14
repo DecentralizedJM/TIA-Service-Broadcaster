@@ -593,6 +593,73 @@ class SignalBot:
             parse_mode="Markdown"
         )
     
+    async def message_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /message command (admin only) - broadcast message to all subscribers."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        message = update.message or update.channel_post
+        if not message:
+            return
+        
+        # Extract message text - get everything after /message
+        # Use context.args if available, otherwise parse from message text
+        if context.args:
+            # Command with arguments: /message text here
+            broadcast_text = " ".join(context.args)
+        elif message.text:
+            # Parse from message text (handles /message text here format)
+            text = message.text.strip()
+            if text.lower().startswith('/message'):
+                broadcast_text = text[8:].strip()  # Remove '/message' prefix
+            else:
+                broadcast_text = text
+        else:
+            broadcast_text = None
+        
+        if not broadcast_text:
+            await message.reply_text(
+                "❌ **Usage:** `/message <your message here>`\n\n"
+                "Example: `/message All positions have been closed for risk management`",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Get all active subscribers
+        subscribers = await self.db.get_active_subscribers()
+        
+        if not subscribers:
+            await message.reply_text("⚠️ No active subscribers to broadcast to.")
+            return
+        
+        # Send message to all subscribers
+        success_count = 0
+        failed_count = 0
+        
+        for subscriber in subscribers:
+            try:
+                await self.bot.send_message(
+                    chat_id=subscriber.telegram_id,
+                    text=broadcast_text,
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send message to subscriber {subscriber.telegram_id}: {e}")
+                failed_count += 1
+        
+        # Notify admin of results
+        await message.reply_text(
+            f"📨 **Message Broadcast Complete**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Delivered: {success_count}\n"
+            f"❌ Failed: {failed_count}\n"
+            f"📊 Total: {len(subscribers)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="Markdown"
+        )
+        
+        logger.info(f"Admin broadcast message to {success_count}/{len(subscribers)} subscribers")
+    
     # ==================== Signal Handling ====================
     
     async def handle_signal_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1224,6 +1291,7 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
         self.app.add_handler(CommandHandler("setmode", self.setmode_command))
         self.app.add_handler(CommandHandler("unregister", self.unregister_command))
         self.app.add_handler(CommandHandler("adminstats", self.admin_stats_command))
+        self.app.add_handler(CommandHandler("message", self.message_command))
         self.app.add_handler(CommandHandler("chatid", self.chatid_command))
         
         # /signal command - use MessageHandler with Regex for channel/group posts
