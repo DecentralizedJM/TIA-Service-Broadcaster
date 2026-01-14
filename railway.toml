@@ -16,8 +16,9 @@ HOST = "0.0.0.0"
 DATABASE_PATH = "/app/data/subscribers.db"
 WEBHOOK_PATH = "/webhook"
 
-[build.watchPatterns]
-include = ["**/*.py", "requirements.txt", "pyproject.toml", "Dockerfile"]
+# Watch patterns for auto-redeploy (Railway expects array format)
+# Note: watchPatterns is not supported in railway.toml for Docker builds
+# Railway will auto-detect changes from git commits
 
 # Persistent volume for SQLite database
 # Configure in Railway dashboard: Settings > Volumes
