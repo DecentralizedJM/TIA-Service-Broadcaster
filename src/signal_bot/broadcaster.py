@@ -33,6 +33,7 @@ class TradeStatus(Enum):
     INVALID_KEY = "INVALID_KEY"
     SKIPPED = "SKIPPED"
     PENDING_CONFIRMATION = "PENDING_CONFIRMATION"
+    POSITION_EXISTS = "POSITION_EXISTS"  # User already has open position in same asset
 
 
 @dataclass
@@ -247,6 +248,25 @@ class SignalBroadcaster:
         )
         
         try:
+            # Check for existing open positions in the same asset
+            logger.info(f"Checking for existing positions in {signal.symbol} for {subscriber.telegram_id}...")
+            try:
+                positions = client.positions.list_open()
+                existing_position = next((p for p in positions if p.symbol == signal.symbol), None)
+                if existing_position:
+                    logger.info(f"Subscriber {subscriber.telegram_id} already has open position in {signal.symbol}, skipping trade")
+                    return TradeResult(
+                        subscriber_id=subscriber.telegram_id,
+                        username=subscriber.username,
+                        status=TradeStatus.POSITION_EXISTS,
+                        message=f"You already have an open position in {signal.symbol}. Signal skipped to avoid duplicate positions.",
+                        side=signal.signal_type.value,
+                        order_type=signal.order_type.value,
+                    )
+            except Exception as pos_check_error:
+                # If position check fails, log but continue (might be API issue)
+                logger.warning(f"Failed to check positions for {subscriber.telegram_id}: {pos_check_error}, continuing with trade")
+            
             # Get balance
             logger.info(f"Getting balance for {subscriber.telegram_id}...")
             balance_info = client.wallet.get_futures_balance()
@@ -746,8 +766,10 @@ def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_
     # Count all failure types
     failed = sum(1 for r in results if r.status in (TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND))
     insufficient = sum(1 for r in results if r.status == TradeStatus.INSUFFICIENT_BALANCE)
+    skipped_positions = sum(1 for r in results if r.status == TradeStatus.POSITION_EXISTS)
     
     manual_line = f"\n👆 Manual (awaiting): {manual_count}" if manual_count > 0 else ""
+    skipped_line = f"\n⏭️ Skipped (existing position): {skipped_positions}" if skipped_positions > 0 else ""
     
     # Add error details for debugging (without Markdown formatting to avoid parse errors)
     error_details = ""
@@ -770,7 +792,8 @@ def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_
 Results:
 ✅ Success: {success}
 💰 Insufficient Balance: {insufficient}
-❌ Failed: {failed}{manual_line}{error_details}
+⏭️ Skipped (existing position): {skipped_positions}
+❌ Failed: {failed}{manual_line}{skipped_line}{error_details}
 ━━━━━━━━━━━━━━━━━━━━
 Total: {len(results) + manual_count} subscribers"""
 
@@ -788,6 +811,17 @@ def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
 🛑 SL: {signal.stop_loss or "Not set"}
 🎯 TP: {signal.take_profit or "Not set"}
 ⚡ Leverage: {signal.leverage}x
+━━━━━━━━━━━━━━━━━━━━"""
+    
+    elif result.status == TradeStatus.POSITION_EXISTS:
+        return f"""⏭️ Signal Skipped
+━━━━━━━━━━━━━━━━━━━━
+🆔 Signal: {signal.signal_id}
+📊 {signal.signal_type.value} {signal.symbol}
+
+{result.message}
+
+Close your existing position first if you want to take this signal.
 ━━━━━━━━━━━━━━━━━━━━"""
     
     elif result.status == TradeStatus.INSUFFICIENT_BALANCE:

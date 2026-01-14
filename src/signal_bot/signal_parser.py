@@ -79,8 +79,9 @@ class SignalParseError(Exception):
 class SignalParser:
     """Parse trading signals from Telegram messages."""
     
-    # Signal ID pattern: SIG-DDMMYY-SYMBOL (e.g., SIG-030126-BTCUSDT)
-    SIGNAL_ID_PATTERN = r"SIG-\d{6}-[A-Z0-9]+"
+    # Signal ID pattern: SIG-DDMMYY-SYMBOL-UUID (e.g., SIG-030126-BTCUSDT-59797F)
+    # Also supports old format without UUID for backward compatibility
+    SIGNAL_ID_PATTERN = r"SIG-\d{6}-[A-Z0-9]+(?:-[A-Z0-9]{6})?"
     
     # Regex patterns - support both orders: "LONG BTCUSDT" or "BTCUSDT LONG"
     SIGNAL_PATTERN = re.compile(
@@ -347,10 +348,11 @@ class SignalParser:
         
         Example:
             SIG-030126-BTCUSDT -> BTCUSDT
-            SIG-030126-XRPUSDT -> XRPUSDT
+            SIG-030126-XRPUSDT-59797F -> XRPUSDT
         """
         parts = signal_id.split("-")
         if len(parts) >= 3:
+            # Symbol is always the 3rd part (index 2), regardless of UUID suffix
             return parts[2].upper()
         return None
     

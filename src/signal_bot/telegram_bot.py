@@ -82,6 +82,8 @@ class SignalBot:
         self.bot: Optional[Bot] = None
         # Rate limiting: user_id -> list of timestamps
         self._register_attempts: Dict[int, List[datetime]] = {}
+        # Track manual confirmations: (signal_id, user_id) -> (message_id, chat_id, timestamp)
+        self._pending_confirmations: Dict[tuple, tuple] = {}
         
         logger.info(f"SignalBot initialized - Admin: {settings.admin_telegram_id}")
     
@@ -581,8 +583,12 @@ class SignalBot:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👥 Total Subscribers: {stats['total_subscribers']}\n"
             f"✅ Active: {stats['active_subscribers']}\n"
+            f"   🤖 Auto Mode: {stats['auto_subscribers']}\n"
+            f"   👆 Manual Mode: {stats['manual_subscribers']}\n"
             f"📈 Total Trades: {stats['total_trades']}\n"
-            f"📡 Active Signals: {stats['active_signals']}\n"
+            f"📡 Signals:\n"
+            f"   • Total Given: {stats['total_signals']}\n"
+            f"   • Active: {stats['active_signals']}\n"
             f"━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
@@ -677,8 +683,8 @@ class SignalBot:
                     and result.available_balance >= 1.0):
                     # Offer to trade with available balance
                     await self._send_reduced_balance_offer(signal, result)
-                elif result.status in [TradeStatus.SUCCESS, TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.INVALID_KEY]:
-                    # Notify only for SUCCESS or INSUFFICIENT_BALANCE (hide API errors from users)
+                elif result.status in [TradeStatus.SUCCESS, TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS]:
+                    # Notify for SUCCESS, INSUFFICIENT_BALANCE, POSITION_EXISTS, or INVALID_KEY
                     # Broadcaster ensures messages are sanitized and human-readable
                     notification = format_user_trade_notification(signal, result)
                     await self.bot.send_message(
@@ -726,11 +732,19 @@ class SignalBot:
 Click "Execute Trade" to proceed or "Skip" to ignore.
 """.strip()
         
-        await self.bot.send_message(
+        sent_message = await self.bot.send_message(
             chat_id=subscriber.telegram_id,
             text=text,
             parse_mode="Markdown",
             reply_markup=keyboard,
+        )
+        
+        # Track this confirmation for expiration (5 minutes)
+        # Use (signal_id, user_id) as key since multiple users can have same signal
+        self._pending_confirmations[(signal.signal_id, subscriber.telegram_id)] = (
+            sent_message.message_id,
+            subscriber.telegram_id,
+            datetime.now()
         )
         
         logger.info(f"Sent confirmation request to {subscriber.telegram_id} for signal {signal.signal_id}")
@@ -788,9 +802,13 @@ Would you like to execute this trade with your available balance instead?
         # "b:{signal_id}:{amount}" - trade with reduced balance
         if data.startswith("c:"):
             signal_id = data[2:]
+            # Remove from pending confirmations if exists (using tuple key)
+            self._pending_confirmations.pop((signal_id, user_id), None)
             await self._execute_confirmed_trade(query, signal_id, user_id)
         elif data.startswith("r:"):
             signal_id = data[2:]
+            # Remove from pending confirmations if exists (using tuple key)
+            self._pending_confirmations.pop((signal_id, user_id), None)
             await query.edit_message_text(
                 f"⏭️ **Trade Skipped**\n\n"
                 f"Signal `{signal_id}` was not executed.\n"
@@ -802,6 +820,8 @@ Would you like to execute this trade with your available balance instead?
             parts = data[2:].split(":")
             if len(parts) == 2:
                 signal_id, amount_str = parts
+                # Remove from pending confirmations if exists (using tuple key)
+                self._pending_confirmations.pop((signal_id, user_id), None)
                 try:
                     amount = float(amount_str)
                     await self._execute_with_balance(query, signal_id, user_id, amount)
@@ -1105,6 +1125,60 @@ Would you like to execute this trade with your available balance instead?
         logger.info("Initializing database connection...")
         await self.db.connect()
         logger.info("Database connected successfully")
+        
+        # Start background task for expiring manual confirmations
+        asyncio.create_task(self._expire_confirmations_task())
+    
+    async def _expire_confirmations_task(self):
+        """Background task to expire manual confirmations after 5 minutes."""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                now = datetime.now()
+                expired_signals = []
+                
+                for (signal_id, user_id), (message_id, chat_id, timestamp) in list(self._pending_confirmations.items()):
+                    # Check if 5 minutes have passed
+                    if (now - timestamp) >= timedelta(minutes=5):
+                        expired_signals.append(((signal_id, user_id), message_id, chat_id))
+                
+                # Expire and update messages
+                for key, message_id, chat_id in expired_signals:
+                    try:
+                        signal_id, user_id = key
+                        # Remove from tracking
+                        self._pending_confirmations.pop(key, None)
+                        
+                        # Update the message to show expiration
+                        expired_text = f"""⏰ **Trade Signal Expired**
+━━━━━━━━━━━━━━━━━━━━
+🆔 Signal: `{signal_id}`
+
+This trade signal expired due to inactivity.
+
+You had 5 minutes to confirm the trade, but no action was taken. The signal is no longer valid.
+
+💡 **Tip:** Switch to AUTO mode with /setmode auto to execute trades automatically.
+━━━━━━━━━━━━━━━━━━━━"""
+                        
+                        await self.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=expired_text,
+                            parse_mode="Markdown"
+                        )
+                        
+                        logger.info(f"Expired manual confirmation for signal {signal_id} (user {user_id})")
+                    except Exception as e:
+                        # Message might have been deleted or already edited
+                        logger.debug(f"Could not expire confirmation for {key}: {e}")
+                        # Remove from tracking anyway
+                        self._pending_confirmations.pop(key, None)
+                        
+            except Exception as e:
+                logger.error(f"Error in expiration task: {e}", exc_info=True)
+                await asyncio.sleep(60)  # Wait longer on error
     
     async def _post_shutdown(self, application: Application):
         """Called after Application.shutdown() - close database."""

@@ -438,6 +438,8 @@ class Database:
             SELECT 
                 COUNT(*) as total_subscribers,
                 SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_subscribers,
+                SUM(CASE WHEN is_active = 1 AND UPPER(COALESCE(trade_mode, 'AUTO')) = 'AUTO' THEN 1 ELSE 0 END) as auto_subscribers,
+                SUM(CASE WHEN is_active = 1 AND UPPER(COALESCE(trade_mode, 'AUTO')) = 'MANUAL' THEN 1 ELSE 0 END) as manual_subscribers,
                 SUM(total_trades) as total_trades,
                 SUM(total_pnl) as total_pnl
             FROM subscribers
@@ -447,12 +449,20 @@ class Database:
         async with self._connection.execute(
             "SELECT COUNT(*) as count FROM signals WHERE status = 'ACTIVE'"
         ) as cursor:
-            signals_row = await cursor.fetchone()
+            active_signals_row = await cursor.fetchone()
+        
+        async with self._connection.execute(
+            "SELECT COUNT(*) as count FROM signals"
+        ) as cursor:
+            total_signals_row = await cursor.fetchone()
         
         return {
             "total_subscribers": row["total_subscribers"] or 0,
             "active_subscribers": row["active_subscribers"] or 0,
+            "auto_subscribers": row["auto_subscribers"] or 0,
+            "manual_subscribers": row["manual_subscribers"] or 0,
             "total_trades": row["total_trades"] or 0,
             "total_pnl": row["total_pnl"] or 0.0,
-            "active_signals": signals_row["count"] or 0,
+            "active_signals": active_signals_row["count"] or 0,
+            "total_signals": total_signals_row["count"] or 0,
         }
