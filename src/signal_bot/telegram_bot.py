@@ -85,6 +85,9 @@ class SignalBot:
         # Track manual confirmations: (signal_id, user_id) -> (message_id, chat_id, timestamp)
         self._pending_confirmations: Dict[tuple, tuple] = {}
         
+        # Background tasks (store references to prevent garbage collection)
+        self._background_tasks: List[asyncio.Task] = []
+        
         logger.info(f"SignalBot initialized - Admin: {settings.admin_telegram_id}")
     
     def _is_admin(self, user_id: int) -> bool:
@@ -1220,24 +1223,54 @@ Would you like to execute this trade with your available balance instead?
     # ==================== Bot Setup ====================
     
     async def _post_init(self, application: Application):
-        """Called after Application.initialize() - connect database."""
-        logger.info("Initializing database connection...")
-        await self.db.connect()
-        logger.info("Database connected successfully")
+        """Called after Application.initialize() - connect database and start background tasks."""
+        logger.info("SignalBot _post_init called")
         
-        # Start background task for expiring manual confirmations
-        asyncio.create_task(self._expire_confirmations_task())
+        # Connect database if not already connected
+        if not self.db._connection:
+            logger.info("Connecting database from _post_init...")
+            await self.db.connect()
+            logger.info("Database connected via _post_init")
+        else:
+            logger.info("Database already connected, skipping connect")
         
-        # Start background task for 12-hour balance check
-        asyncio.create_task(self._balance_check_task())
+        # Start background tasks
+        await self.start_background_tasks()
+    
+    async def start_background_tasks(self):
+        """Start background tasks (can be called from server.py if needed)."""
+        if self._background_tasks:
+            logger.info("Background tasks already running, skipping start")
+            return
+        
+        logger.info("Starting background tasks...")
+        
+        # Start expiration task and store reference
+        expire_task = asyncio.create_task(self._expire_confirmations_task())
+        expire_task.set_name("expire_confirmations_task")
+        self._background_tasks.append(expire_task)
+        
+        # Start balance check task and store reference
+        balance_task = asyncio.create_task(self._balance_check_task())
+        balance_task.set_name("balance_check_task")
+        self._background_tasks.append(balance_task)
+        
+        logger.info(f"Started {len(self._background_tasks)} background tasks")
     
     async def _expire_confirmations_task(self):
         """Background task to expire manual confirmations after 5 minutes."""
+        logger.info("Expiration task started - checking every 30 seconds")
+        
         while True:
             try:
                 await asyncio.sleep(30)  # Check every 30 seconds
                 
                 now = datetime.now()
+                pending_count = len(self._pending_confirmations)
+                
+                if pending_count > 0:
+                    logger.info(f"Checking {pending_count} pending confirmations for expiration...")
+                
                 expired_signals = []
                 
                 for (signal_id, user_id), (message_id, chat_id, timestamp) in list(self._pending_confirmations.items()):

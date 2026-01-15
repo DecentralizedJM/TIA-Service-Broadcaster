@@ -61,6 +61,9 @@ async def lifespan(app: FastAPI):
     # Set up webhook
     await signal_bot.setup_webhook()
     
+    # Ensure background tasks are started (may have been started by _post_init, but double-check)
+    await signal_bot.start_background_tasks()
+    
     subscriber_count = await database.get_subscriber_count()
     logger.info(f"Bot ready! {subscriber_count} active subscribers")
     
