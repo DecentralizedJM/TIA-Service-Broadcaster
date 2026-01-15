@@ -368,29 +368,26 @@ class SignalBroadcaster:
             
             logger.info(f"Calculated Qty: {qty} (Value: ${actual_value:.2f})")
 
-            # Enforce Minimum Order Value (Mudrex requirement)
+            # Handle low balance scenario - try to execute with available balance
+            # Instead of returning error, we'll attempt the trade and let API decide
+            low_balance_warning = None
             if actual_value < self.MIN_ORDER_VALUE:
-                logger.info(f"Value ${actual_value:.2f} < Min ${self.MIN_ORDER_VALUE}. Adjusting...")
-                qty, actual_value = calculate_order_from_usd(
-                    usd_amount=self.MIN_ORDER_VALUE,
-                    price=price,
-                    quantity_step=float(asset.quantity_step),
-                )
+                logger.info(f"Value ${actual_value:.2f} < Min ${self.MIN_ORDER_VALUE}. Attempting with available balance...")
+                # Calculate required margin for minimum order
+                required_margin = self.MIN_ORDER_VALUE / leverage
                 
-                # Check if user has enough balance for this increase
-                required_margin = actual_value / leverage
-                # 1% buffer
-                if required_margin * 1.01 > balance:
-                     return TradeResult(
-                        subscriber_id=subscriber.telegram_id,
-                        username=subscriber.username,
-                        status=TradeStatus.INSUFFICIENT_BALANCE,
-                        message=f"Balance ${balance:.2f} too low for min order val ${actual_value:.2f} (Req Margin: ~${required_margin:.2f})",
-                        side=signal.signal_type.value,
-                        order_type=signal.order_type.value,
-                        available_balance=balance,
+                if required_margin > balance:
+                    # Balance is too low even for minimum - try anyway with what we have
+                    logger.info(f"Balance ${balance:.2f} < required ${required_margin:.2f}, attempting with available balance")
+                    low_balance_warning = f"Balance was low (${balance:.2f}). Trade executed with available funds."
+                else:
+                    # Can afford minimum, adjust to minimum
+                    qty, actual_value = calculate_order_from_usd(
+                        usd_amount=self.MIN_ORDER_VALUE,
+                        price=price,
+                        quantity_step=float(asset.quantity_step),
                     )
-                logger.info(f"Adjusted to {qty} (${actual_value:.2f})")
+                    logger.info(f"Adjusted to minimum: {qty} (${actual_value:.2f})")
 
             if qty <= 0:
                  return TradeResult(
@@ -438,6 +435,10 @@ class SignalBroadcaster:
             msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
             if sl_param or tp_param:
                 msg += " | SL/TP set"
+            
+            # Add low balance warning if applicable
+            if low_balance_warning:
+                msg += f"\n⚠️ {low_balance_warning}"
 
             return TradeResult(
                 subscriber_id=subscriber.telegram_id,
@@ -609,8 +610,9 @@ class SignalBroadcaster:
                         target_pos.position_id, 
                         close_qty_str
                     )
-                    success = True if success_obj else False
-                    action_msg = f"Closed {close.percentage}%"
+                    # Partial close returns updated position or order object on success
+                    success = success_obj is not None
+                    action_msg = f"Closed {percentage:.0f}%"
 
                 if success:
                     return TradeResult(

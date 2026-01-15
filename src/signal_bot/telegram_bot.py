@@ -916,6 +916,26 @@ Would you like to execute this trade with your available balance instead?
             )
             return
         
+        # Check if signal is older than 5 minutes (expired)
+        if signal_data.get("created_at"):
+            signal_time = datetime.fromisoformat(signal_data["created_at"])
+            if (datetime.now() - signal_time) >= timedelta(minutes=5):
+                await query.edit_message_text(
+                    f"⏰ **Trade Signal Expired**\n\n"
+                    f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
+                    f"You can only confirm trades within 5 minutes of receiving them.",
+                    parse_mode="Markdown"
+                )
+                return
+        
+        # Re-check signal exists (already validated above, but keep for safety)
+        if not signal_data:
+            await query.edit_message_text(
+                f"❌ Signal `{signal_id}` not found.",
+                parse_mode="Markdown"
+            )
+            return
+        
         # Reconstruct Signal object
         from .signal_parser import Signal, SignalType, OrderType
         from datetime import datetime
@@ -962,6 +982,18 @@ Would you like to execute this trade with your available balance instead?
                 parse_mode="Markdown"
             )
             return
+        
+        # Check if signal is older than 5 minutes (expired)
+        if signal_data.get("created_at"):
+            signal_time = datetime.fromisoformat(signal_data["created_at"])
+            if (datetime.now() - signal_time) >= timedelta(minutes=5):
+                await query.edit_message_text(
+                    f"⏰ **Trade Signal Expired**\n\n"
+                    f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
+                    f"You can only confirm trades within 5 minutes of receiving them.",
+                    parse_mode="Markdown"
+                )
+                return
         
         # Reconstruct Signal object
         from .signal_parser import Signal, SignalType, OrderType
@@ -1195,6 +1227,9 @@ Would you like to execute this trade with your available balance instead?
         
         # Start background task for expiring manual confirmations
         asyncio.create_task(self._expire_confirmations_task())
+        
+        # Start background task for 12-hour balance check
+        asyncio.create_task(self._balance_check_task())
     
     async def _expire_confirmations_task(self):
         """Background task to expire manual confirmations after 5 minutes."""
@@ -1229,11 +1264,13 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
 💡 **Tip:** Switch to AUTO mode with /setmode auto to execute trades automatically.
 ━━━━━━━━━━━━━━━━━━━━"""
                         
+                        # Remove inline keyboard by passing reply_markup=None
                         await self.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
                             text=expired_text,
-                            parse_mode="Markdown"
+                            parse_mode="Markdown",
+                            reply_markup=None  # Remove buttons so user can't click after expiration
                         )
                         
                         logger.info(f"Expired manual confirmation for signal {signal_id} (user {user_id})")
@@ -1246,6 +1283,79 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
             except Exception as e:
                 logger.error(f"Error in expiration task: {e}", exc_info=True)
                 await asyncio.sleep(60)  # Wait longer on error
+    
+    async def _balance_check_task(self):
+        """Background task to check subscriber balances every 12 hours and warn if low."""
+        from mudrex import MudrexClient
+        
+        # Wait 1 minute after startup before first check
+        await asyncio.sleep(60)
+        
+        while True:
+            try:
+                logger.info("Starting 12-hour balance check for all subscribers...")
+                
+                subscribers = await self.db.get_active_subscribers()
+                low_balance_count = 0
+                
+                for subscriber in subscribers:
+                    try:
+                        # Check balance in thread pool
+                        def check_balance(api_secret: str) -> float:
+                            client = MudrexClient(api_secret=api_secret)
+                            balance_info = client.wallet.get_futures_balance()
+                            return float(balance_info.balance) if balance_info else 0.0
+                        
+                        balance = await asyncio.wait_for(
+                            asyncio.to_thread(check_balance, subscriber.api_secret),
+                            timeout=30.0
+                        )
+                        
+                        # Check if balance is lower than configured trade amount
+                        if balance < subscriber.trade_amount_usdt:
+                            low_balance_count += 1
+                            
+                            # Send soft warning to user
+                            warning_msg = f"""💰 **Low Balance Alert**
+━━━━━━━━━━━━━━━━━━━━
+Your Mudrex Futures wallet balance is lower than your configured trade amount.
+
+💵 Current Balance: **${balance:.2f} USDT**
+⚙️ Configured Amount: **${subscriber.trade_amount_usdt:.2f} USDT**
+
+To ensure your trades execute successfully, please:
+1. Add funds to your Mudrex Futures wallet, OR
+2. Reduce your trade amount with `/setamount {int(balance)}`
+
+⚠️ Trades may execute with reduced amounts until you top up.
+━━━━━━━━━━━━━━━━━━━━"""
+                            
+                            try:
+                                await self.bot.send_message(
+                                    chat_id=subscriber.telegram_id,
+                                    text=warning_msg,
+                                    parse_mode="Markdown"
+                                )
+                                logger.info(f"Sent low balance warning to {subscriber.telegram_id}: ${balance:.2f} < ${subscriber.trade_amount_usdt:.2f}")
+                            except Exception as send_error:
+                                logger.error(f"Failed to send balance warning to {subscriber.telegram_id}: {send_error}")
+                        
+                        # Small delay between checks to avoid rate limiting
+                        await asyncio.sleep(0.5)
+                        
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Balance check timeout for {subscriber.telegram_id}")
+                    except Exception as sub_error:
+                        logger.error(f"Balance check failed for {subscriber.telegram_id}: {sub_error}")
+                
+                logger.info(f"Balance check complete. {low_balance_count}/{len(subscribers)} subscribers have low balance.")
+                
+                # Sleep for 12 hours before next check
+                await asyncio.sleep(12 * 60 * 60)  # 12 hours in seconds
+                
+            except Exception as e:
+                logger.error(f"Error in balance check task: {e}", exc_info=True)
+                await asyncio.sleep(60 * 60)  # Wait 1 hour on error before retry
     
     async def _post_shutdown(self, application: Application):
         """Called after Application.shutdown() - close database."""
