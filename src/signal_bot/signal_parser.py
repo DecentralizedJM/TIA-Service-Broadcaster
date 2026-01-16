@@ -94,9 +94,10 @@ class SignalParser:
     )
     
     # Multi-line signal pattern (symbol and direction on separate lines)
-    # Matches: BTCUSDT\nLONG or BTCUSDT\nSHORT
+    # Matches: BTCUSDT\nLONG or XRPUSDT\nSHORT
+    # Symbol is 2-15 alphanumeric characters
     MULTILINE_SIGNAL_PATTERN = re.compile(
-        r"^([A-Z0-9]+USDT?)\s*\n\s*(LONG|SHORT)",
+        r"^([A-Z0-9]{2,15})\s*\n\s*(LONG|SHORT)",
         re.IGNORECASE | re.MULTILINE
     )
     

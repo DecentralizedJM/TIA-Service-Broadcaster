@@ -667,7 +667,11 @@ class SignalBroadcaster:
                     actual_value=0.0
                 )
 
-        tasks = [_close_for_subscriber(sub) for sub in active_subscribers]
+        async def _close_for_subscriber_throttled(subscriber: Subscriber) -> TradeResult:
+            async with self._trade_semaphore:
+                return await _close_for_subscriber(subscriber)
+
+        tasks = [_close_for_subscriber_throttled(sub) for sub in active_subscribers]
         results = await asyncio.gather(*tasks)
         
         await self.db.close_signal(close.signal_id)
@@ -732,7 +736,11 @@ class SignalBroadcaster:
                     order_type="UPDATE"
                 )
 
-        tasks = [_update_leverage_for_subscriber(sub) for sub in active_subscribers]
+        async def _update_leverage_for_subscriber_throttled(subscriber: Subscriber) -> TradeResult:
+            async with self._trade_semaphore:
+                return await _update_leverage_for_subscriber(subscriber)
+
+        tasks = [_update_leverage_for_subscriber_throttled(sub) for sub in active_subscribers]
         results = await asyncio.gather(*tasks)
         
         return results

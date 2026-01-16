@@ -108,8 +108,8 @@ class Database:
                 signal_type TEXT NOT NULL,
                 order_type TEXT NOT NULL,
                 entry_price REAL,
-                stop_loss REAL NOT NULL,
-                take_profit REAL NOT NULL,
+                stop_loss REAL,
+                take_profit REAL,
                 leverage INTEGER NOT NULL,
                 status TEXT DEFAULT 'ACTIVE',
                 created_at TEXT NOT NULL,
@@ -366,7 +366,7 @@ class Database:
         ))
         
         # Update subscriber stats
-        if status == "SUCCESS":
+        if status in ("SUCCESS", "SUCCESS_REDUCED"):
             await self._connection.execute(
                 "UPDATE subscribers SET total_trades = total_trades + 1 WHERE telegram_id = ?",
                 (telegram_id,)
@@ -388,10 +388,6 @@ class Database:
         """Save a signal to the database."""
         now = datetime.now().isoformat()
         
-        # Handle None values for SL/TP (store as 0.0 to satisfy NOT NULL constraint)
-        stop_loss_val = stop_loss if stop_loss is not None else 0.0
-        take_profit_val = take_profit if take_profit is not None else 0.0
-        
         await self._connection.execute("""
             INSERT OR REPLACE INTO signals (
                 signal_id, symbol, signal_type, order_type,
@@ -399,7 +395,7 @@ class Database:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
         """, (
             signal_id, symbol, signal_type, order_type,
-            entry_price, stop_loss_val, take_profit_val, leverage, now
+            entry_price, stop_loss, take_profit, leverage, now
         ))
         await self._connection.commit()
     

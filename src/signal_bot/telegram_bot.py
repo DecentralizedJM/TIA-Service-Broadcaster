@@ -636,27 +636,19 @@ class SignalBot:
             return
         
         # Send message to all subscribers
-        success_count = 0
-        failed_count = 0
-        
+        broadcast_notifications = []
         for subscriber in subscribers:
-            try:
-                await self.bot.send_message(
-                    chat_id=subscriber.telegram_id,
-                    text=broadcast_text,
-                )
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Failed to send message to subscriber {subscriber.telegram_id}: {e}")
-                failed_count += 1
+            broadcast_notifications.append((subscriber.telegram_id, broadcast_text, {}))
+            
+        if broadcast_notifications:
+            asyncio.create_task(self._send_throttled_notifications(broadcast_notifications))
         
         # Notify admin of results
         await message.reply_text(
-            f"📨 **Message Broadcast Complete**\n"
+            f"📨 **Message Broadcast Initiated**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Delivered: {success_count}\n"
-            f"❌ Failed: {failed_count}\n"
-            f"📊 Total: {len(subscribers)}\n"
+            f"📊 Total Subscribers: {len(subscribers)}\n"
+            f"⏳ Sending in background with rate limiting...\n"
             f"━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
@@ -731,6 +723,42 @@ class SignalBot:
         except Exception as e:
             logger.exception(f"Error handling signal: {e}")
     
+    async def _send_throttled_notifications(self, notifications: List[tuple]):
+        """
+        Send multiple notifications with rate limiting to avoid Telegram limits.
+        
+        Args:
+            notifications: List of (chat_id, text, kwargs) tuples
+        """
+        if not notifications:
+            return
+            
+        logger.info(f"Sending {len(notifications)} throttled notifications...")
+        
+        # Telegram limit is ~30 messages per second
+        # We'll use a safer limit of 20 per second
+        batch_size = 20
+        
+        for i in range(0, len(notifications), batch_size):
+            batch = notifications[i:i + batch_size]
+            tasks = []
+            
+            for chat_id, text, kwargs in batch:
+                tasks.append(self.bot.send_message(chat_id=chat_id, text=text, **kwargs))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Log any failures
+            for j, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Failed to send throttled notification to {batch[j][0]}: {result}")
+            
+            # Wait 1 second before next batch
+            if i + batch_size < len(notifications):
+                await asyncio.sleep(1.0)
+        
+        logger.info(f"Finished sending throttled notifications")
+
     async def _handle_new_signal(self, message, signal: Signal):
         """Handle a new trading signal from admin."""
         # Show signal received
@@ -744,48 +772,31 @@ class SignalBot:
         broadcast_summary = format_broadcast_summary(signal, results, len(manual_subscribers))
         await message.reply_text(broadcast_summary)
         
-        # Notify each AUTO subscriber via DM with trade result
-        # Note: We no longer ask for permission when balance is low - the broadcaster
-        # already tries to execute with available balance automatically
+        # Prepare AUTO subscriber notifications
+        auto_notifications = []
         for result in results:
-            try:
-                # Notify for all statuses that require user attention
-                # (excludes SKIPPED and PENDING_CONFIRMATION which don't need notification)
-                if result.status in [TradeStatus.SUCCESS, TradeStatus.SUCCESS_REDUCED,
-                                      TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.MIN_ORDER_NOT_MET,
-                                      TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS,
-                                      TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND]:
-                    # Broadcaster ensures messages are sanitized and human-readable
-                    notification = format_user_trade_notification(signal, result)
-                    await self.bot.send_message(
-                        chat_id=result.subscriber_id,
-                        text=notification,
-                    )
-            except Exception as e:
-                logger.error(f"Failed to notify {result.subscriber_id}: {e}")
+            if result.status in [TradeStatus.SUCCESS, TradeStatus.SUCCESS_REDUCED,
+                                  TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.MIN_ORDER_NOT_MET,
+                                  TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS,
+                                  TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND]:
+                notification = format_user_trade_notification(signal, result)
+                auto_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
         
-        # Send confirmation request to MANUAL subscribers
+        # Prepare MANUAL subscriber confirmation requests
+        manual_notifications = []
         for subscriber in manual_subscribers:
-            try:
-                await self._send_manual_confirmation(signal, subscriber)
-            except Exception as e:
-                logger.error(f"Failed to send confirmation to {subscriber.telegram_id}: {e}")
-    
-    async def _send_manual_confirmation(self, signal: Signal, subscriber):
-        """Send trade confirmation request to a MANUAL mode subscriber."""
-        # Use short callback data format: "c:{signal_id}" or "r:{signal_id}"
-        # Telegram limit is 64 bytes
-        confirm_data = f"c:{signal.signal_id}"
-        reject_data = f"r:{signal.signal_id}"
-        
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Execute Trade", callback_data=confirm_data),
-                InlineKeyboardButton("❌ Skip", callback_data=reject_data),
-            ]
-        ])
-        
-        text = f"""
+            # Use short callback data format: "c:{signal_id}" or "r:{signal_id}"
+            confirm_data = f"c:{signal.signal_id}"
+            reject_data = f"r:{signal.signal_id}"
+            
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Execute Trade", callback_data=confirm_data),
+                    InlineKeyboardButton("❌ Skip", callback_data=reject_data),
+                ]
+            ])
+            
+            text = f"""
 👆 **Trade Confirmation Required**
 ━━━━━━━━━━━━━━━━━━━━
 🆔 Signal: `{signal.signal_id}`
@@ -801,23 +812,34 @@ class SignalBot:
 ⏰ **You have 5 minutes to confirm.**
 Click "Execute Trade" to proceed or "Skip" to ignore.
 """.strip()
-        
-        sent_message = await self.bot.send_message(
-            chat_id=subscriber.telegram_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
-        
-        # Track this confirmation for expiration (5 minutes)
-        # Use (signal_id, user_id) as key since multiple users can have same signal
-        self._pending_confirmations[(signal.signal_id, subscriber.telegram_id)] = (
-            sent_message.message_id,
-            subscriber.telegram_id,
-            datetime.now()
-        )
-        
-        logger.info(f"Sent confirmation request to {subscriber.telegram_id} for signal {signal.signal_id}")
+            
+            manual_notifications.append((subscriber.telegram_id, text, {
+                "parse_mode": "Markdown",
+                "reply_markup": keyboard
+            }))
+            
+        # Send all notifications in background tasks to not block signal processing
+        # Even though the whole message handling is now in a background task, 
+        # this ensures we handle rate limiting properly within that task.
+        if auto_notifications:
+            asyncio.create_task(self._send_throttled_notifications(auto_notifications))
+            
+        if manual_notifications:
+            # For manual notifications, we need to track them for expiration
+            # So we'll wrap the send function to record message_ids
+            async def send_manual_and_track():
+                for chat_id, text, kwargs in manual_notifications:
+                    try:
+                        sent = await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+                        self._pending_confirmations[(signal.signal_id, chat_id)] = (
+                            sent.message_id, chat_id, datetime.now()
+                        )
+                        # Minimal sleep to avoid hitting rate limits
+                        await asyncio.sleep(0.05) 
+                    except Exception as e:
+                        logger.error(f"Failed to send manual confirmation to {chat_id}: {e}")
+            
+            asyncio.create_task(send_manual_and_track())
     
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1046,6 +1068,7 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
         )
         
         # Notify Users
+        close_notifications = []
         for result in results:
              if result.status == TradeStatus.SKIPPED:
                  continue
@@ -1062,16 +1085,12 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
                  notification += f"❌ Failed to close: {result.message}\n" \
                                  f"⚠️ Please check Mudrex manually."
              
-             notification += "━━━━━━━━━━━━━━━━━━━━"
+             notification += "\n━━━━━━━━━━━━━━━━━━━━"
              
-             try:
-                 await self.bot.send_message(
-                     chat_id=result.subscriber_id,
-                     text=notification,
-                     parse_mode="Markdown"
-                 )
-             except Exception as e:
-                 logger.error(f"Failed to notify close to {result.subscriber_id}: {e}")
+             close_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
+        
+        if close_notifications:
+            asyncio.create_task(self._send_throttled_notifications(close_notifications))
     
     async def _handle_leverage_signal(self, message, lev: SignalLeverage):
         """Handle a leverage update signal."""
@@ -1092,6 +1111,7 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
         )
         
         # Notify Users
+        lev_notifications = []
         for result in results:
              if result.status == TradeStatus.SKIPPED:
                  continue
@@ -1106,16 +1126,12 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
              else:
                  notification += f"❌ Update Failed: {result.message}\n"
              
-             notification += "━━━━━━━━━━━━━━━━━━━━"
+             notification += "\n━━━━━━━━━━━━━━━━━━━━"
              
-             try:
-                 await self.bot.send_message(
-                     chat_id=result.subscriber_id,
-                     text=notification,
-                     parse_mode="Markdown"
-                 )
-             except Exception as e:
-                 logger.error(f"Failed to notify leverage update to {result.subscriber_id}: {e}")
+             lev_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
+             
+        if lev_notifications:
+            asyncio.create_task(self._send_throttled_notifications(lev_notifications))
     
     # ==================== Channel Signal Command ====================
     

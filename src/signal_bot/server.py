@@ -121,8 +121,9 @@ async def webhook(request: Request):
         data = await request.json()
         update = Update.de_json(data, signal_bot.bot)
         
-        # Process update asynchronously
-        await signal_bot.app.process_update(update)
+        # Process update in background task to prevent Telegram webhook timeout
+        # Telegram expects a 200 OK response within ~30-60 seconds
+        asyncio.create_task(signal_bot.app.process_update(update))
         
         return Response(status_code=200)
     except Exception as e:
