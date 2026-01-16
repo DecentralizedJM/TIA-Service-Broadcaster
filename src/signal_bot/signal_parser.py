@@ -125,9 +125,10 @@ class SignalParser:
         re.IGNORECASE
     )
     
+    # Multi-line format: /editsltp\nSIG-...\nSL: 42000\nTP: 48000
     EDIT_SLTP_PATTERN = re.compile(
-        rf"/editsltp\s+({SIGNAL_ID_PATTERN})\s+([\d\.]+)(?:\s+([\d\.]+))?",
-        re.IGNORECASE | re.DOTALL
+        rf"/editsltp\s+({SIGNAL_ID_PATTERN})",
+        re.IGNORECASE
     )
     
     PARTIAL_PATTERN = re.compile(
@@ -377,37 +378,40 @@ class SignalParser:
         I'll try to find SL/TP by comparing with current values or just use keywords?
         User didn't specify keywords. I'll check common range or just provide both?
         
-        Let's try to match 1 or 2 values after ID.
+        Format:
+            /editsltp 
+            SIG-160126-BTCUSDT-A1B2C3 
+            SL: 42000 
+            TP: 48000
         """
         text = message.strip()
-        # Remove multiple spaces/newlines
-        text = re.sub(r'\s+', ' ', text)
         
-        match = cls.EDIT_SLTP_PATTERN.match(text)
+        match = cls.EDIT_SLTP_PATTERN.search(text)
         if not match:
             return None
             
         signal_id = match.group(1).upper()
-        val1 = float(match.group(2))
-        val2 = float(match.group(3)) if match.group(3) else None
         
         symbol = cls.extract_symbol_from_id(signal_id)
         if not symbol:
             return None
-            
-        # Ambiguity handling: if only 1 value is provided, we don't know if it's SL or TP.
-        # But for now I'll just store them and let the broadcaster decide or handle it.
-        # Requirements says: /editsltp <Signal ID> <New SL> or /editsltp <Signal ID> <New TP>
-        # I'll use a better pattern that supports keywords if possible, 
-        # or just assume val1 is SL if val2 is None? 
-        # Wait, usually SL is below Entry for LONG, above for SHORT.
-        # I'll just return it as a generic edit and handle it later.
+        
+        # Extract SL and TP using labeled parameter patterns
+        sl_match = cls.PARAM_PATTERNS['sl'].search(text)
+        tp_match = cls.PARAM_PATTERNS['tp'].search(text)
+        
+        stop_loss = float(sl_match.group(1)) if sl_match else None
+        take_profit = float(tp_match.group(1)) if tp_match else None
+        
+        # Must have at least one of SL or TP
+        if stop_loss is None and take_profit is None:
+            return None
         
         return SignalEditSLTP(
             signal_id=signal_id,
             symbol=symbol,
-            stop_loss=val1 if val2 is not None else val1, # Fallback
-            take_profit=val2
+            stop_loss=stop_loss,
+            take_profit=take_profit
         )
     
     @classmethod
