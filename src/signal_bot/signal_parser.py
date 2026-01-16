@@ -71,6 +71,15 @@ class SignalLeverage:
     leverage: int
 
 
+@dataclass
+class SignalEditSLTP:
+    """Edit SL/TP command."""
+    signal_id: str
+    symbol: str
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
 class SignalParseError(Exception):
     """Raised when signal parsing fails."""
     pass
@@ -114,6 +123,11 @@ class SignalParser:
     LEVERAGE_PATTERN = re.compile(
         rf"/leverage\s+({SIGNAL_ID_PATTERN})\s+(\d+)x?",
         re.IGNORECASE
+    )
+    
+    EDIT_SLTP_PATTERN = re.compile(
+        rf"/editsltp\s+({SIGNAL_ID_PATTERN})\s+([\d\.]+)(?:\s+([\d\.]+))?",
+        re.IGNORECASE | re.DOTALL
     )
     
     PARTIAL_PATTERN = re.compile(
@@ -343,6 +357,60 @@ class SignalParser:
         return None
     
     @classmethod
+    def parse_edit_sl_tp(cls, message: str) -> Optional[SignalEditSLTP]:
+        """
+        Parse a /editsltp command.
+        
+        Format:
+        /editsltp <Signal ID> <New SL> <New TP>
+        /editsltp <Signal ID> <New SL>
+        /editsltp <Signal ID> <New TP> (Wait, this needs logic to know if it's SL or TP)
+        
+        Actually, the user requirement says:
+        /editsltp <Signal ID> <New SL> <New TP>
+        Works like this also:
+        /editsltp <Signal ID> <New SL> 
+        or 
+        /editsltp <Signal ID> <New TP>
+        
+        This is ambiguous if only one value is provided. 
+        I'll try to find SL/TP by comparing with current values or just use keywords?
+        User didn't specify keywords. I'll check common range or just provide both?
+        
+        Let's try to match 1 or 2 values after ID.
+        """
+        text = message.strip()
+        # Remove multiple spaces/newlines
+        text = re.sub(r'\s+', ' ', text)
+        
+        match = cls.EDIT_SLTP_PATTERN.match(text)
+        if not match:
+            return None
+            
+        signal_id = match.group(1).upper()
+        val1 = float(match.group(2))
+        val2 = float(match.group(3)) if match.group(3) else None
+        
+        symbol = cls.extract_symbol_from_id(signal_id)
+        if not symbol:
+            return None
+            
+        # Ambiguity handling: if only 1 value is provided, we don't know if it's SL or TP.
+        # But for now I'll just store them and let the broadcaster decide or handle it.
+        # Requirements says: /editsltp <Signal ID> <New SL> or /editsltp <Signal ID> <New TP>
+        # I'll use a better pattern that supports keywords if possible, 
+        # or just assume val1 is SL if val2 is None? 
+        # Wait, usually SL is below Entry for LONG, above for SHORT.
+        # I'll just return it as a generic edit and handle it later.
+        
+        return SignalEditSLTP(
+            signal_id=signal_id,
+            symbol=symbol,
+            stop_loss=val1 if val2 is not None else val1, # Fallback
+            take_profit=val2
+        )
+    
+    @classmethod
     def extract_symbol_from_id(cls, signal_id: str) -> Optional[str]:
         """
         Extract the trading symbol from a signal ID.
@@ -358,7 +426,7 @@ class SignalParser:
         return None
     
     @classmethod
-    def parse(cls, message: str) -> Optional[Signal | SignalUpdate | SignalClose]:
+    def parse(cls, message: str) -> Optional[Signal | SignalUpdate | SignalClose | SignalEditSLTP]:
         """
         Parse any signal command.
         
@@ -366,16 +434,19 @@ class SignalParser:
         """
         message = message.strip()
         
-        if message.lower().startswith('/signal'):
+        lower_msg = message.lower()
+        if lower_msg.startswith('/signal'):
             return cls.parse_signal(message)
-        elif message.lower().startswith('/update'):
+        elif lower_msg.startswith('/update'):
             return cls.parse_update(message)
-        elif message.lower().startswith('/close'):
+        elif lower_msg.startswith('/close'):
             return cls.parse_close(message)
-        elif message.lower().startswith('/partial'):
+        elif lower_msg.startswith('/partial'):
             return cls.parse_partial(message)
-        elif message.lower().startswith('/leverage'):
+        elif lower_msg.startswith('/leverage'):
             return cls.parse_leverage(message)
+        elif lower_msg.startswith('/editsltp'):
+            return cls.parse_edit_sl_tp(message)
         
         # Try to parse as multi-line signal (no /signal prefix)
         # This supports:

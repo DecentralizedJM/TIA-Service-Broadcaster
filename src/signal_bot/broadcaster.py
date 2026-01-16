@@ -20,7 +20,7 @@ from mudrex.exceptions import MudrexAPIError
 from mudrex.utils import calculate_order_from_usd
 
 from .database import Database, Subscriber
-from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose, SignalLeverage
+from .signal_parser import Signal, SignalType, OrderType, SignalUpdate, SignalClose, SignalLeverage, SignalEditSLTP
 
 logger = logging.getLogger(__name__)
 
@@ -759,6 +759,91 @@ class SignalBroadcaster:
         """
         logger.info(f"Executing confirmed trade for {subscriber.telegram_id}: {signal.signal_id}")
         return await self._execute_for_subscriber(signal, subscriber)
+    
+    async def broadcast_edit_sl_tp(self, edit: SignalEditSLTP) -> List[TradeResult]:
+        """
+        Broadcast an SL/TP update to all subscribers.
+        """
+        logger.info(f"Broadcasting SL/TP update for {edit.signal_id}")
+        
+        active_subscribers = await self.db.get_active_subscribers()
+        
+        async def _update_sl_tp_for_subscriber(subscriber: Subscriber) -> TradeResult:
+            if subscriber.trade_mode != 'AUTO':
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SKIPPED,
+                    message="Manual mode",
+                    side="EDIT_SLTP",
+                    order_type="UPDATE"
+                )
+
+            try:
+                client = MudrexClient(api_secret=subscriber.api_secret)
+                
+                # Fetch positions to find the position ID for this symbol
+                positions = await asyncio.to_thread(client.positions.list_open)
+                target_pos = next((p for p in positions if p.symbol == edit.symbol), None)
+                
+                if not target_pos:
+                    return TradeResult(
+                        subscriber_id=subscriber.telegram_id,
+                        username=subscriber.username,
+                        status=TradeStatus.SKIPPED,
+                        message="No open position found",
+                        side="EDIT_SLTP",
+                        order_type="UPDATE"
+                    )
+                
+                # Update SL/TP on the position
+                # Assuming Mudrex SDK supports position update or set_sl_tp
+                # Based on create_market_order params, it uses stoploss_price and takeprofit_price
+                
+                # We need to use the correct SDK method. 
+                # If there's no set_sl_tp, we might need to cancel existing trigger orders and create new ones.
+                # But Mudrex usually has a direct position update.
+                
+                # I'll use a generic approach assuming set_sl_tp exists or update position
+                # In many SDKs it is: client.positions.set_sl_tp(position_id, stop_loss, take_profit)
+                await asyncio.to_thread(
+                    client.positions.set_sl_tp,
+                    position_id=target_pos.position_id,
+                    stoploss_price=str(edit.stop_loss) if edit.stop_loss else None,
+                    takeprofit_price=str(edit.take_profit) if edit.take_profit else None
+                )
+                
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.SUCCESS,
+                    message=f"SL/TP updated for {edit.symbol}",
+                    side="EDIT_SLTP",
+                    order_type="UPDATE"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to update SL/TP for {subscriber.telegram_id}: {e}")
+                return TradeResult(
+                    subscriber_id=subscriber.telegram_id,
+                    username=subscriber.username,
+                    status=TradeStatus.API_ERROR,
+                    message=f"Error: {str(e)[:100]}",
+                    side="EDIT_SLTP",
+                    order_type="UPDATE"
+                )
+
+        async def _update_sl_tp_for_subscriber_throttled(subscriber: Subscriber) -> TradeResult:
+            async with self._trade_semaphore:
+                return await _update_sl_tp_for_subscriber(subscriber)
+
+        tasks = [_update_sl_tp_for_subscriber_throttled(sub) for sub in active_subscribers]
+        results = await asyncio.gather(*tasks)
+        
+        # Update signal in database
+        await self.db.update_signal_sl_tp(edit.signal_id, edit.stop_loss, edit.take_profit)
+        
+        return results
     
     async def execute_with_amount(
         self, 

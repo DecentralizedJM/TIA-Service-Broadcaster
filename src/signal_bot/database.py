@@ -420,6 +420,36 @@ class Database:
                 return dict(row)
             return None
     
+    async def update_signal_sl_tp(self, signal_id: str, stop_loss: Optional[float], take_profit: Optional[float]):
+        """Update SL and/or TP for a signal."""
+        updates = []
+        params = []
+        
+        if stop_loss is not None:
+            updates.append("stop_loss = ?")
+            params.append(stop_loss)
+            
+        if take_profit is not None:
+            updates.append("take_profit = ?")
+            params.append(take_profit)
+            
+        if not updates:
+            return
+            
+        params.append(signal_id)
+        query = f"UPDATE signals SET {', '.join(updates)} WHERE signal_id = ?"
+        
+        await self._connection.execute(query, tuple(params))
+        await self._connection.commit()
+
+    async def get_active_signals(self) -> List[dict]:
+        """Get all currently active signals."""
+        async with self._connection.execute(
+            "SELECT * FROM signals WHERE status = 'ACTIVE' ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+    
     async def get_subscriber_count(self) -> int:
         """Get total active subscriber count."""
         async with self._connection.execute(

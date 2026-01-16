@@ -31,6 +31,7 @@ from .signal_parser import (
     SignalUpdate,
     SignalClose,
     SignalLeverage,
+    SignalEditSLTP,
     SignalParseError,
     format_signal_summary,
 )
@@ -653,7 +654,52 @@ class SignalBot:
             parse_mode="Markdown"
         )
         
-        logger.info(f"Admin broadcast message to {success_count}/{len(subscribers)} subscribers")
+        logger.info(f"Admin broadcast message to {len(subscribers)} subscribers")
+    
+    async def active_positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /activepositions command (admin only) - show all active signals."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        active_signals = await self.db.get_active_signals()
+        
+        if not active_signals:
+            await update.message.reply_text(
+                "📊 **No Active Positions**\n\n"
+                "There are currently no active signals/positions.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Format the active signals list
+        lines = ["📊 **Active Positions**", "━━━━━━━━━━━━━━━━━━━━"]
+        
+        for sig in active_signals:
+            signal_id = sig.get("signal_id", "Unknown")
+            symbol = sig.get("symbol", "Unknown")
+            signal_type = sig.get("signal_type", "Unknown")
+            entry = sig.get("entry_price") or "Market"
+            sl = sig.get("stop_loss") or "Not set"
+            tp = sig.get("take_profit") or "Not set"
+            leverage = sig.get("leverage", 1)
+            created = sig.get("created_at", "Unknown")[:10] if sig.get("created_at") else "Unknown"
+            
+            lines.append(f"\n🆔 `{signal_id}`")
+            lines.append(f"📈 {signal_type} **{symbol}**")
+            lines.append(f"💵 Entry: {entry} | Lev: {leverage}x")
+            lines.append(f"🛑 SL: {sl} | 🎯 TP: {tp}")
+            lines.append(f"📅 {created}")
+            lines.append("───────────────────")
+        
+        lines.append(f"\n**Total: {len(active_signals)} active signal(s)**")
+        
+        response = "\n".join(lines)
+        
+        # Truncate if too long
+        if len(response) > 4000:
+            response = response[:3900] + "\n\n... (truncated)"
+        
+        await update.message.reply_text(response, parse_mode="Markdown")
     
     # ==================== Signal Handling ====================
     
@@ -717,6 +763,8 @@ class SignalBot:
                 await self._handle_close_signal(message, parsed)
             elif isinstance(parsed, SignalLeverage):
                 await self._handle_leverage_signal(message, parsed)
+            elif isinstance(parsed, SignalEditSLTP):
+                await self._handle_edit_sl_tp_signal(message, parsed)
                 
         except SignalParseError as e:
             await message.reply_text(f"⚠️ Signal parse error: {e}")
@@ -1132,9 +1180,60 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
              
         if lev_notifications:
             asyncio.create_task(self._send_throttled_notifications(lev_notifications))
-    
+
+    async def _handle_edit_sl_tp_signal(self, message, edit: SignalEditSLTP):
+        """Handle an SL/TP update signal."""
+        results = await self.broadcaster.broadcast_edit_sl_tp(edit)
+        
+        # Notify Admin
+        success_count = sum(1 for r in results if r.status == TradeStatus.SUCCESS)
+        skipped_count = sum(1 for r in results if r.status == TradeStatus.SKIPPED)
+        failed_count = sum(1 for r in results if r.status == TradeStatus.API_ERROR)
+        
+        sl_info = f"SL: {edit.stop_loss}" if edit.stop_loss else ""
+        tp_info = f"TP: {edit.take_profit}" if edit.take_profit else ""
+        vals = " & ".join(filter(None, [sl_info, tp_info]))
+        
+        await message.reply_text(
+             f"🎯 Signal `{edit.signal_id}` SL/TP Update\n"
+             f"━━━━━━━━━━━━━━━━━━━━\n"
+             f"Values: {vals}\n"
+             f"✅ Success: {success_count}\n"
+             f"⏭️ Skipped: {skipped_count}\n"
+             f"❌ Failed: {failed_count}",
+             parse_mode="Markdown"
+        )
+        
+        # Notify Users
+        edit_notifications = []
+        for result in results:
+             if result.status == TradeStatus.SKIPPED:
+                 continue
+             
+             notification = f"🎯 **SL/TP Updated**\n" \
+                            f"━━━━━━━━━━━━━━━━━━━━\n" \
+                            f"🆔 Signal: `{edit.signal_id}`\n" \
+                            f"📊 {edit.symbol}\n\n"
+                            
+             if edit.stop_loss:
+                 notification += f"🛑 New SL: {edit.stop_loss}\n"
+             if edit.take_profit:
+                 notification += f"🎯 New TP: {edit.take_profit}\n"
+                 
+             if result.status == TradeStatus.SUCCESS:
+                 notification += f"\n✅ Changes applied successfully"
+             else:
+                 notification += f"\n❌ Update Failed: {result.message}"
+             
+             notification += "\n━━━━━━━━━━━━━━━━━━━━"
+             
+             edit_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
+             
+        if edit_notifications:
+            asyncio.create_task(self._send_throttled_notifications(edit_notifications))
+
     # ==================== Channel Signal Command ====================
-    
+
     async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handle /signal command from channel admins.
@@ -1448,6 +1547,7 @@ To ensure your trades execute successfully, please:
         self.app.add_handler(CommandHandler("setmode", self.setmode_command))
         self.app.add_handler(CommandHandler("unregister", self.unregister_command))
         self.app.add_handler(CommandHandler("adminstats", self.admin_stats_command))
+        self.app.add_handler(CommandHandler("activepositions", self.active_positions_command))
         self.app.add_handler(CommandHandler("message", self.message_command))
         self.app.add_handler(CommandHandler("chatid", self.chatid_command))
         
