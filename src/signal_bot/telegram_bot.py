@@ -821,12 +821,13 @@ class SignalBot:
         await message.reply_text(broadcast_summary)
         
         # Prepare AUTO subscriber notifications
+        # Only send user-facing notifications (not admin errors like symbol not found, API errors)
         auto_notifications = []
         for result in results:
             if result.status in [TradeStatus.SUCCESS, TradeStatus.SUCCESS_REDUCED,
                                   TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.MIN_ORDER_NOT_MET,
-                                  TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS,
-                                  TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND]:
+                                  TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS]:
+                # User-facing statuses only - skip SYMBOL_NOT_FOUND and API_ERROR (admin issues)
                 notification = format_user_trade_notification(signal, result)
                 auto_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
         
@@ -1447,7 +1448,7 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
                 await asyncio.sleep(60)  # Wait longer on error
     
     async def _balance_check_task(self):
-        """Background task to check subscriber balances every 12 hours and warn if low."""
+        """Background task to check subscriber balances twice daily and notify if low."""
         from mudrex import MudrexClient
         
         # Wait 1 minute after startup before first check
@@ -1455,7 +1456,7 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
         
         while True:
             try:
-                logger.info("Starting 12-hour balance check for all subscribers...")
+                logger.info("Starting daily balance check for all subscribers...")
                 
                 subscribers = await self.db.get_active_subscribers()
                 low_balance_count = 0
@@ -1477,7 +1478,7 @@ You had 5 minutes to confirm the trade, but no action was taken. The signal is n
                         if balance < subscriber.trade_amount_usdt:
                             low_balance_count += 1
                             
-                            # Send soft warning to user
+                            # Send low balance warning to user
                             warning_msg = f"""💰 **Low Balance Alert**
 ━━━━━━━━━━━━━━━━━━━━
 Your Mudrex Futures wallet balance is lower than your configured trade amount.
@@ -1512,8 +1513,9 @@ To ensure your trades execute successfully, please:
                 
                 logger.info(f"Balance check complete. {low_balance_count}/{len(subscribers)} subscribers have low balance.")
                 
-                # Sleep for 12 hours before next check
-                await asyncio.sleep(12 * 60 * 60)  # 12 hours in seconds
+                # Sleep for 12 hours before next check (checks twice daily)
+                # This ensures users get notifications twice per day if balance remains low
+                await asyncio.sleep(12 * 60 * 60)  # 12 hours = twice daily
                 
             except Exception as e:
                 logger.error(f"Error in balance check task: {e}", exc_info=True)
