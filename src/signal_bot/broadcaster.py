@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 class TradeStatus(Enum):
     SUCCESS = "SUCCESS"
+    SUCCESS_REDUCED = "SUCCESS_REDUCED"  # Trade succeeded with reduced amount (low balance)
     INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"
+    MIN_ORDER_NOT_MET = "MIN_ORDER_NOT_MET"  # Balance too low even for minimum order
     SYMBOL_NOT_FOUND = "SYMBOL_NOT_FOUND"
     API_ERROR = "API_ERROR"
     INVALID_KEY = "INVALID_KEY"
@@ -275,6 +277,7 @@ class SignalBroadcaster:
             
             # Determine trade margin (amount user wants to bet)
             target_margin = subscriber.trade_amount_usdt
+            used_reduced_balance = False  # Track if we're trading with reduced amount
             
             # Auto-adjust if balance is lower than configured margin
             if balance < target_margin:
@@ -284,7 +287,7 @@ class SignalBroadcaster:
                         subscriber_id=subscriber.telegram_id,
                         username=subscriber.username,
                         status=TradeStatus.INSUFFICIENT_BALANCE,
-                        message=f"No balance available (0 USDT)",
+                        message=f"No balance available (0 USDT). Please add funds to your futures wallet.",
                         side=signal.signal_type.value,
                         order_type=signal.order_type.value,
                         available_balance=balance,
@@ -292,6 +295,7 @@ class SignalBroadcaster:
                 # Use entire available balance as margin
                 logger.info(f"Auto-adjusting margin from {target_margin} to {balance:.2f} USDT (using available balance)")
                 target_margin = balance
+                used_reduced_balance = True
             
             # Get asset details early
             logger.info(f"Getting asset info for {signal.symbol}...")
@@ -369,17 +373,24 @@ class SignalBroadcaster:
             logger.info(f"Calculated Qty: {qty} (Value: ${actual_value:.2f})")
 
             # Handle low balance scenario - try to execute with available balance
-            # Instead of returning error, we'll attempt the trade and let API decide
-            low_balance_warning = None
+            # Don't ask for permission - just attempt the trade automatically
             if actual_value < self.MIN_ORDER_VALUE:
-                logger.info(f"Value ${actual_value:.2f} < Min ${self.MIN_ORDER_VALUE}. Attempting with available balance...")
+                logger.info(f"Value ${actual_value:.2f} < Min ${self.MIN_ORDER_VALUE}. Checking if we can meet minimum...")
                 # Calculate required margin for minimum order
                 required_margin = self.MIN_ORDER_VALUE / leverage
                 
                 if required_margin > balance:
-                    # Balance is too low even for minimum - try anyway with what we have
-                    logger.info(f"Balance ${balance:.2f} < required ${required_margin:.2f}, attempting with available balance")
-                    low_balance_warning = f"Balance was low (${balance:.2f}). Trade executed with available funds."
+                    # Balance is too low even for minimum order
+                    logger.info(f"Balance ${balance:.2f} < required ${required_margin:.2f} - cannot meet minimum order value")
+                    return TradeResult(
+                        subscriber_id=subscriber.telegram_id,
+                        username=subscriber.username,
+                        status=TradeStatus.MIN_ORDER_NOT_MET,
+                        message=f"Tried to execute with available margin (${balance:.2f}) but minimum order value (~${self.MIN_ORDER_VALUE}) wasn't met. Please add funds to your futures wallet.",
+                        side=signal.signal_type.value,
+                        order_type=signal.order_type.value,
+                        available_balance=balance,
+                    )
                 else:
                     # Can afford minimum, adjust to minimum
                     qty, actual_value = calculate_order_from_usd(
@@ -388,6 +399,7 @@ class SignalBroadcaster:
                         quantity_step=float(asset.quantity_step),
                     )
                     logger.info(f"Adjusted to minimum: {qty} (${actual_value:.2f})")
+                    used_reduced_balance = True  # We adjusted the amount
 
             if qty <= 0:
                  return TradeResult(
@@ -431,19 +443,23 @@ class SignalBroadcaster:
             
             logger.info(f"Order created: {order.order_id if order else 'None'}")
             
-            # Success Message
-            msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
-            if sl_param or tp_param:
-                msg += " | SL/TP set"
-            
-            # Add low balance warning if applicable
-            if low_balance_warning:
-                msg += f"\n⚠️ {low_balance_warning}"
+            # Determine status and message based on whether we used reduced balance
+            if used_reduced_balance:
+                status = TradeStatus.SUCCESS_REDUCED
+                msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
+                if sl_param or tp_param:
+                    msg += " | SL/TP set"
+                msg += f"\n⚠️ Trade executed with available amount. Please add funds to your futures wallet."
+            else:
+                status = TradeStatus.SUCCESS
+                msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
+                if sl_param or tp_param:
+                    msg += " | SL/TP set"
 
             return TradeResult(
                 subscriber_id=subscriber.telegram_id,
                 username=subscriber.username,
-                status=TradeStatus.SUCCESS,
+                status=status,
                 message=msg,
                 order_id=order.order_id,
                 quantity=qty_str,
@@ -451,6 +467,7 @@ class SignalBroadcaster:
                 side=side,
                 order_type=signal.order_type.value,
                 entry_price=signal.entry_price,
+                available_balance=balance if used_reduced_balance else None,
             )
             
         except MudrexAPIError as e:
@@ -764,14 +781,21 @@ class SignalBroadcaster:
 
 def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_count: int = 0) -> str:
     """Format broadcast results for admin notification."""
+    # Count success (both normal and reduced)
     success = sum(1 for r in results if r.status == TradeStatus.SUCCESS)
+    success_reduced = sum(1 for r in results if r.status == TradeStatus.SUCCESS_REDUCED)
+    total_success = success + success_reduced
+    
     # Count all failure types
     failed = sum(1 for r in results if r.status in (TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND))
     insufficient = sum(1 for r in results if r.status == TradeStatus.INSUFFICIENT_BALANCE)
+    min_order_not_met = sum(1 for r in results if r.status == TradeStatus.MIN_ORDER_NOT_MET)
     skipped_positions = sum(1 for r in results if r.status == TradeStatus.POSITION_EXISTS)
     
     manual_line = f"\n👆 Manual (awaiting): {manual_count}" if manual_count > 0 else ""
     skipped_line = f"\n⏭️ Skipped (existing position): {skipped_positions}" if skipped_positions > 0 else ""
+    reduced_line = f"\n⚠️ Success (reduced amt): {success_reduced}" if success_reduced > 0 else ""
+    min_order_line = f"\n📉 Min order not met: {min_order_not_met}" if min_order_not_met > 0 else ""
     
     # Add error details for debugging (without Markdown formatting to avoid parse errors)
     error_details = ""
@@ -792,8 +816,8 @@ def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_
 📊 {signal.signal_type.value} {signal.symbol}
 
 Results:
-✅ Success: {success}
-💰 Insufficient Balance: {insufficient}
+✅ Success: {total_success}{reduced_line}
+💰 Insufficient Balance: {insufficient}{min_order_line}
 ⏭️ Skipped (existing position): {skipped_positions}
 ❌ Failed: {failed}{manual_line}{skipped_line}{error_details}
 ━━━━━━━━━━━━━━━━━━━━
@@ -815,6 +839,23 @@ def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
 ⚡ Leverage: {signal.leverage}x
 ━━━━━━━━━━━━━━━━━━━━"""
     
+    elif result.status == TradeStatus.SUCCESS_REDUCED:
+        # Trade executed but with reduced amount due to low balance
+        qty_info = f"\n📦 Quantity: {result.quantity}" if result.quantity else ""
+        value_info = f" (~${result.actual_value:.2f})" if result.actual_value else ""
+        return f"""✅ Trade Executed (Reduced Amount)
+━━━━━━━━━━━━━━━━━━━━
+🆔 Signal: {signal.signal_id}
+📊 {signal.signal_type.value} {signal.symbol}
+📋 {signal.order_type.value}{qty_info}{value_info}
+🛑 SL: {signal.stop_loss or "Not set"}
+🎯 TP: {signal.take_profit or "Not set"}
+⚡ Leverage: {signal.leverage}x
+━━━━━━━━━━━━━━━━━━━━
+⚠️ Trade executed with available amount.
+Please add funds to your futures wallet.
+━━━━━━━━━━━━━━━━━━━━"""
+    
     elif result.status == TradeStatus.POSITION_EXISTS:
         return f"""⏭️ Signal Skipped
 ━━━━━━━━━━━━━━━━━━━━
@@ -826,6 +867,19 @@ def format_user_trade_notification(signal: Signal, result: TradeResult) -> str:
 Close your existing position first if you want to take this signal.
 ━━━━━━━━━━━━━━━━━━━━"""
     
+    elif result.status == TradeStatus.MIN_ORDER_NOT_MET:
+        # Tried to execute with available balance but still couldn't meet minimum
+        balance_info = f"${result.available_balance:.2f}" if result.available_balance else "insufficient"
+        return f"""❌ Trade Not Executed
+━━━━━━━━━━━━━━━━━━━━
+🆔 Signal: {signal.signal_id}
+📊 {signal.signal_type.value} {signal.symbol}
+
+Tried to execute with available margin ({balance_info}) but the minimum order value criteria wasn't met.
+
+Trade couldn't execute. Please add funds to your futures wallet.
+━━━━━━━━━━━━━━━━━━━━"""
+    
     elif result.status == TradeStatus.INSUFFICIENT_BALANCE:
         return f"""💰 Insufficient Balance
 ━━━━━━━━━━━━━━━━━━━━
@@ -834,7 +888,7 @@ Close your existing position first if you want to take this signal.
 
 {result.message}
 
-Use /setamount to adjust your trade size.
+Please add funds to your futures wallet.
 ━━━━━━━━━━━━━━━━━━━━"""
     
     elif result.status == TradeStatus.SYMBOL_NOT_FOUND:

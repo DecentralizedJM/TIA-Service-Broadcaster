@@ -745,16 +745,16 @@ class SignalBot:
         await message.reply_text(broadcast_summary)
         
         # Notify each AUTO subscriber via DM with trade result
+        # Note: We no longer ask for permission when balance is low - the broadcaster
+        # already tries to execute with available balance automatically
         for result in results:
             try:
-                # Check if insufficient balance but has some available
-                if (result.status == TradeStatus.INSUFFICIENT_BALANCE 
-                    and result.available_balance 
-                    and result.available_balance >= 1.0):
-                    # Offer to trade with available balance
-                    await self._send_reduced_balance_offer(signal, result)
-                elif result.status in [TradeStatus.SUCCESS, TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS]:
-                    # Notify for SUCCESS, INSUFFICIENT_BALANCE, POSITION_EXISTS, or INVALID_KEY
+                # Notify for all statuses that require user attention
+                # (excludes SKIPPED and PENDING_CONFIRMATION which don't need notification)
+                if result.status in [TradeStatus.SUCCESS, TradeStatus.SUCCESS_REDUCED,
+                                      TradeStatus.INSUFFICIENT_BALANCE, TradeStatus.MIN_ORDER_NOT_MET,
+                                      TradeStatus.INVALID_KEY, TradeStatus.POSITION_EXISTS,
+                                      TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND]:
                     # Broadcaster ensures messages are sanitized and human-readable
                     notification = format_user_trade_notification(signal, result)
                     await self.bot.send_message(
@@ -819,42 +819,6 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
         
         logger.info(f"Sent confirmation request to {subscriber.telegram_id} for signal {signal.signal_id}")
     
-    async def _send_reduced_balance_offer(self, signal: Signal, result):
-        """Send an offer to trade with available balance when configured amount is insufficient."""
-        available = result.available_balance
-        
-        # Callback data: "b:{signal_id}:{amount}" (b = balance trade)
-        accept_data = f"b:{signal.signal_id}:{available:.2f}"
-        reject_data = f"r:{signal.signal_id}"
-        
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"✅ Trade with ${available:.2f}", callback_data=accept_data),
-                InlineKeyboardButton("❌ Skip", callback_data=reject_data),
-            ]
-        ])
-        
-        text = f"""
-💰 **Insufficient Balance**
-━━━━━━━━━━━━━━━━━━━━
-🆔 Signal: `{signal.signal_id}`
-📊 {signal.signal_type.value} **{signal.symbol}**
-
-Your configured amount exceeds your balance.
-Available balance: **${available:.2f} USDT**
-
-Would you like to execute this trade with your available balance instead?
-━━━━━━━━━━━━━━━━━━━━
-""".strip()
-        
-        await self.bot.send_message(
-            chat_id=result.subscriber_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
-        
-        logger.info(f"Sent reduced balance offer to {result.subscriber_id} for signal {signal.signal_id}")
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback button presses (for manual trade confirmations)."""
@@ -904,129 +868,163 @@ Would you like to execute this trade with your available balance instead?
     
     async def _execute_confirmed_trade(self, query, signal_id: str, user_id: int):
         """Execute a trade after user confirms in MANUAL mode."""
-        # Get subscriber
-        subscriber = await self.db.get_subscriber(user_id)
-        if not subscriber or not subscriber.is_active:
-            await query.edit_message_text("❌ You're not registered anymore.")
-            return
-        
-        # Get the signal from database
-        signal_data = await self.db.get_signal(signal_id)
-        if not signal_data:
-            await query.edit_message_text(
-                f"❌ Signal `{signal_id}` not found or expired.",
-                parse_mode="Markdown"
-            )
-            return
-        
-        # Check if signal is older than 5 minutes (expired)
-        if signal_data.get("created_at"):
-            signal_time = datetime.fromisoformat(signal_data["created_at"])
-            if (datetime.now() - signal_time) >= timedelta(minutes=5):
+        try:
+            # Get subscriber
+            subscriber = await self.db.get_subscriber(user_id)
+            if not subscriber or not subscriber.is_active:
+                await query.edit_message_text("❌ You're not registered anymore.")
+                return
+            
+            # Get the signal from database
+            signal_data = await self.db.get_signal(signal_id)
+            if not signal_data:
                 await query.edit_message_text(
-                    f"⏰ **Trade Signal Expired**\n\n"
-                    f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
-                    f"You can only confirm trades within 5 minutes of receiving them.",
+                    f"❌ Signal `{signal_id}` not found or expired.",
                     parse_mode="Markdown"
                 )
                 return
-        
-        # Re-check signal exists (already validated above, but keep for safety)
-        if not signal_data:
+            
+            # Check if signal is older than 5 minutes (expired)
+            if signal_data.get("created_at"):
+                signal_time = datetime.fromisoformat(signal_data["created_at"])
+                if (datetime.now() - signal_time) >= timedelta(minutes=5):
+                    await query.edit_message_text(
+                        f"⏰ **Trade Signal Expired**\n\n"
+                        f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
+                        f"You can only confirm trades within 5 minutes of receiving them.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            
+            # Reconstruct Signal object
+            # Convert 0.0 back to None for SL/TP (database stores 0.0 for NULL)
+            from .signal_parser import Signal, SignalType, OrderType
+            from datetime import datetime
+            
+            stop_loss_val = signal_data.get("stop_loss")
+            take_profit_val = signal_data.get("take_profit")
+            # Convert 0.0 to None (database stores 0.0 for missing values)
+            if stop_loss_val == 0.0:
+                stop_loss_val = None
+            if take_profit_val == 0.0:
+                take_profit_val = None
+            
+            signal = Signal(
+                signal_id=signal_data["signal_id"],
+                symbol=signal_data["symbol"],
+                signal_type=SignalType(signal_data["signal_type"]),
+                order_type=OrderType(signal_data["order_type"]),
+                entry_price=signal_data.get("entry_price"),
+                stop_loss=stop_loss_val,
+                take_profit=take_profit_val,
+                leverage=signal_data.get("leverage", 1),
+                raw_message="",  # Not stored in DB, not needed for execution
+                timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
+            )
+            
+            # Update message to show processing
             await query.edit_message_text(
-                f"❌ Signal `{signal_id}` not found.",
+                f"⏳ **Executing trade...**\n\n"
+                f"Signal: `{signal_id}`",
                 parse_mode="Markdown"
             )
-            return
-        
-        # Reconstruct Signal object
-        from .signal_parser import Signal, SignalType, OrderType
-        from datetime import datetime
-        signal = Signal(
-            signal_id=signal_data["signal_id"],
-            symbol=signal_data["symbol"],
-            signal_type=SignalType(signal_data["signal_type"]),
-            order_type=OrderType(signal_data["order_type"]),
-            entry_price=signal_data.get("entry_price"),
-            stop_loss=signal_data.get("stop_loss"),
-            take_profit=signal_data.get("take_profit"),
-            leverage=signal_data.get("leverage", 1),
-            raw_message="",  # Not stored in DB, not needed for execution
-            timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
-        )
-        
-        # Update message to show processing
-        await query.edit_message_text(
-            f"⏳ **Executing trade...**\n\n"
-            f"Signal: `{signal_id}`",
-            parse_mode="Markdown"
-        )
-        
-        # Execute the trade
-        result = await self.broadcaster.execute_single_trade(signal, subscriber)
-        
-        # Notify user of result
-        notification = format_user_trade_notification(signal, result)
-        await query.edit_message_text(notification)
+            
+            # Execute the trade
+            result = await self.broadcaster.execute_single_trade(signal, subscriber)
+            
+            # Notify user of result
+            notification = format_user_trade_notification(signal, result)
+            await query.edit_message_text(notification)
+            
+        except Exception as e:
+            logger.error(f"Error executing confirmed trade for {user_id}: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"❌ **Trade Execution Failed**\n\n"
+                f"Signal: `{signal_id}`\n"
+                f"Error: {str(e)[:100]}\n\n"
+                f"Please try again or contact support.",
+                parse_mode="Markdown"
+            )
     
     async def _execute_with_balance(self, query, signal_id: str, user_id: int, amount: float):
         """Execute a trade with a specific amount (for reduced balance flow)."""
-        # Get subscriber
-        subscriber = await self.db.get_subscriber(user_id)
-        if not subscriber or not subscriber.is_active:
-            await query.edit_message_text("❌ You're not registered anymore.")
-            return
-        
-        # Get the signal from database
-        signal_data = await self.db.get_signal(signal_id)
-        if not signal_data:
-            await query.edit_message_text(
-                f"❌ Signal `{signal_id}` not found or expired.",
-                parse_mode="Markdown"
-            )
-            return
-        
-        # Check if signal is older than 5 minutes (expired)
-        if signal_data.get("created_at"):
-            signal_time = datetime.fromisoformat(signal_data["created_at"])
-            if (datetime.now() - signal_time) >= timedelta(minutes=5):
+        try:
+            # Get subscriber
+            subscriber = await self.db.get_subscriber(user_id)
+            if not subscriber or not subscriber.is_active:
+                await query.edit_message_text("❌ You're not registered anymore.")
+                return
+            
+            # Get the signal from database
+            signal_data = await self.db.get_signal(signal_id)
+            if not signal_data:
                 await query.edit_message_text(
-                    f"⏰ **Trade Signal Expired**\n\n"
-                    f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
-                    f"You can only confirm trades within 5 minutes of receiving them.",
+                    f"❌ Signal `{signal_id}` not found or expired.",
                     parse_mode="Markdown"
                 )
                 return
-        
-        # Reconstruct Signal object
-        from .signal_parser import Signal, SignalType, OrderType
-        from datetime import datetime
-        signal = Signal(
-            signal_id=signal_data["signal_id"],
-            symbol=signal_data["symbol"],
-            signal_type=SignalType(signal_data["signal_type"]),
-            order_type=OrderType(signal_data["order_type"]),
-            entry_price=signal_data.get("entry_price"),
-            stop_loss=signal_data.get("stop_loss"),
-            take_profit=signal_data.get("take_profit"),
-            leverage=signal_data.get("leverage", 1),
-            raw_message="",
-            timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
-        )
-        
-        # Update message to show processing
-        await query.edit_message_text(
-            f"⏳ **Executing trade with ${amount:.2f}...**\n\n"
-            f"Signal: `{signal_id}`",
-            parse_mode="Markdown"
-        )
-        
-        # Execute the trade with override amount
-        result = await self.broadcaster.execute_with_amount(signal, subscriber, amount)
-        
-        # Notify user of result
-        notification = format_user_trade_notification(signal, result)
-        await query.edit_message_text(notification)
+            
+            # Check if signal is older than 5 minutes (expired)
+            if signal_data.get("created_at"):
+                signal_time = datetime.fromisoformat(signal_data["created_at"])
+                if (datetime.now() - signal_time) >= timedelta(minutes=5):
+                    await query.edit_message_text(
+                        f"⏰ **Trade Signal Expired**\n\n"
+                        f"Signal `{signal_id}` has expired (older than 5 minutes).\n"
+                        f"You can only confirm trades within 5 minutes of receiving them.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            
+            # Reconstruct Signal object
+            # Convert 0.0 back to None for SL/TP (database stores 0.0 for NULL)
+            from .signal_parser import Signal, SignalType, OrderType
+            from datetime import datetime
+            
+            stop_loss_val = signal_data.get("stop_loss")
+            take_profit_val = signal_data.get("take_profit")
+            # Convert 0.0 to None (database stores 0.0 for missing values)
+            if stop_loss_val == 0.0:
+                stop_loss_val = None
+            if take_profit_val == 0.0:
+                take_profit_val = None
+            
+            signal = Signal(
+                signal_id=signal_data["signal_id"],
+                symbol=signal_data["symbol"],
+                signal_type=SignalType(signal_data["signal_type"]),
+                order_type=OrderType(signal_data["order_type"]),
+                entry_price=signal_data.get("entry_price"),
+                stop_loss=stop_loss_val,
+                take_profit=take_profit_val,
+                leverage=signal_data.get("leverage", 1),
+                raw_message="",
+                timestamp=datetime.fromisoformat(signal_data["created_at"]) if signal_data.get("created_at") else datetime.now(),
+            )
+            
+            # Update message to show processing
+            await query.edit_message_text(
+                f"⏳ **Executing trade with ${amount:.2f}...**\n\n"
+                f"Signal: `{signal_id}`",
+                parse_mode="Markdown"
+            )
+            
+            # Execute the trade with override amount
+            result = await self.broadcaster.execute_with_amount(signal, subscriber, amount)
+            
+            # Notify user of result
+            notification = format_user_trade_notification(signal, result)
+            await query.edit_message_text(notification)
+            
+        except Exception as e:
+            logger.error(f"Error executing trade with balance for {user_id}: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"❌ **Trade Execution Failed**\n\n"
+                f"Signal: `{signal_id}`\n"
+                f"Error: {str(e)[:100]}\n\n"
+                f"Please try again or contact support.",
+                parse_mode="Markdown"
+            )
     
     async def _handle_close_signal(self, message, close: SignalClose):
         """Handle a close signal from admin."""
