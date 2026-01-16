@@ -969,7 +969,6 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
             # Reconstruct Signal object
             # Convert 0.0 back to None for SL/TP (database stores 0.0 for NULL)
             from .signal_parser import Signal, SignalType, OrderType
-            from datetime import datetime
             
             stop_loss_val = signal_data.get("stop_loss")
             take_profit_val = signal_data.get("take_profit")
@@ -1049,7 +1048,6 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
             # Reconstruct Signal object
             # Convert 0.0 back to None for SL/TP (database stores 0.0 for NULL)
             from .signal_parser import Signal, SignalType, OrderType
-            from datetime import datetime
             
             stop_loss_val = signal_data.get("stop_loss")
             take_profit_val = signal_data.get("take_profit")

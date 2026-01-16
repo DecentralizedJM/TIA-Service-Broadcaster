@@ -388,6 +388,10 @@ class Database:
         """Save a signal to the database."""
         now = datetime.now().isoformat()
         
+        # Convert None to 0.0 for database storage (schema may have NOT NULL)
+        sl_value = stop_loss if stop_loss is not None else 0.0
+        tp_value = take_profit if take_profit is not None else 0.0
+        
         await self._connection.execute("""
             INSERT OR REPLACE INTO signals (
                 signal_id, symbol, signal_type, order_type,
@@ -395,7 +399,7 @@ class Database:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
         """, (
             signal_id, symbol, signal_type, order_type,
-            entry_price, stop_loss, take_profit, leverage, now
+            entry_price, sl_value, tp_value, leverage, now
         ))
         await self._connection.commit()
     
