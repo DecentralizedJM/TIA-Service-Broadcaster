@@ -329,7 +329,7 @@ Lev: 10x
 ```
 
 **Parameters:**
-- **Symbol**: Any alphanumeric pair (2-15 characters), e.g., `BTCUSDT`, `XRPUSDT`, `DOGRUSDT`
+- **Symbol**: Any alphanumeric pair (2-15 characters), e.g., `BTCUSDT`, `XRPUSDT`, `DOGEUSDT`
 - **Direction**: `LONG` or `SHORT`
 - **Entry**: Price for limit orders, or `Market`/empty for market orders
 - **SL (Stop Loss)**: Optional, can be `NA` or empty
