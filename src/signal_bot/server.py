@@ -123,7 +123,14 @@ async def webhook(request: Request):
         
         # Process update in background task to prevent Telegram webhook timeout
         # Telegram expects a 200 OK response within ~30-60 seconds
-        asyncio.create_task(signal_bot.app.process_update(update))
+        async def process_update_safely(update: Update):
+            """Process update with error handling."""
+            try:
+                await signal_bot.app.process_update(update)
+            except Exception as e:
+                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
+        
+        asyncio.create_task(process_update_safely(update))
         
         return Response(status_code=200)
     except Exception as e:

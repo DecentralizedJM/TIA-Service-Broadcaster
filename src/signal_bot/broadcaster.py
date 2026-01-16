@@ -672,7 +672,23 @@ class SignalBroadcaster:
                 return await _close_for_subscriber(subscriber)
 
         tasks = [_close_for_subscriber_throttled(sub) for sub in active_subscribers]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out exceptions and convert to TradeResult
+        trade_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Close failed for subscriber {active_subscribers[i].telegram_id}: {result}")
+                trade_results.append(TradeResult(
+                    subscriber_id=active_subscribers[i].telegram_id,
+                    username=active_subscribers[i].username,
+                    status=TradeStatus.API_ERROR,
+                    message=str(result),
+                    side="CLOSE",
+                    order_type="CLOSE",
+                ))
+            else:
+                trade_results.append(result)
         
         await self.db.close_signal(close.signal_id)
         
@@ -741,9 +757,25 @@ class SignalBroadcaster:
                 return await _update_leverage_for_subscriber(subscriber)
 
         tasks = [_update_leverage_for_subscriber_throttled(sub) for sub in active_subscribers]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        return results
+        # Filter out exceptions and convert to TradeResult
+        trade_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Leverage update failed for subscriber {active_subscribers[i].telegram_id}: {result}")
+                trade_results.append(TradeResult(
+                    subscriber_id=active_subscribers[i].telegram_id,
+                    username=active_subscribers[i].username,
+                    status=TradeStatus.API_ERROR,
+                    message=str(result),
+                    side="LEVERAGE",
+                    order_type="UPDATE",
+                ))
+            else:
+                trade_results.append(result)
+        
+        return trade_results
     
     async def execute_single_trade(self, signal: Signal, subscriber: Subscriber) -> TradeResult:
         """
@@ -838,12 +870,28 @@ class SignalBroadcaster:
                 return await _update_sl_tp_for_subscriber(subscriber)
 
         tasks = [_update_sl_tp_for_subscriber_throttled(sub) for sub in active_subscribers]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out exceptions and convert to TradeResult
+        trade_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"SL/TP update failed for subscriber {active_subscribers[i].telegram_id}: {result}")
+                trade_results.append(TradeResult(
+                    subscriber_id=active_subscribers[i].telegram_id,
+                    username=active_subscribers[i].username,
+                    status=TradeStatus.API_ERROR,
+                    message=str(result),
+                    side="EDIT_SLTP",
+                    order_type="UPDATE",
+                ))
+            else:
+                trade_results.append(result)
         
         # Update signal in database
         await self.db.update_signal_sl_tp(edit.signal_id, edit.stop_loss, edit.take_profit)
         
-        return results
+        return trade_results
     
     async def execute_with_amount(
         self, 

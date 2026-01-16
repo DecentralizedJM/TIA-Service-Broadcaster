@@ -1356,13 +1356,31 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
         
         logger.info("Starting background tasks...")
         
+        async def expire_task_with_error_handling():
+            """Wrapper for expiration task with error handling."""
+            try:
+                await self._expire_confirmations_task()
+            except Exception as e:
+                # This should never happen as the task has internal error handling
+                # But if it does, log it for debugging
+                logger.critical(f"Expiration task crashed unexpectedly: {e}", exc_info=True)
+        
+        async def balance_task_with_error_handling():
+            """Wrapper for balance check task with error handling."""
+            try:
+                await self._balance_check_task()
+            except Exception as e:
+                # This should never happen as the task has internal error handling
+                # But if it does, log it for debugging
+                logger.critical(f"Balance check task crashed unexpectedly: {e}", exc_info=True)
+        
         # Start expiration task and store reference
-        expire_task = asyncio.create_task(self._expire_confirmations_task())
+        expire_task = asyncio.create_task(expire_task_with_error_handling())
         expire_task.set_name("expire_confirmations_task")
         self._background_tasks.append(expire_task)
         
         # Start balance check task and store reference
-        balance_task = asyncio.create_task(self._balance_check_task())
+        balance_task = asyncio.create_task(balance_task_with_error_handling())
         balance_task.set_name("balance_check_task")
         self._background_tasks.append(balance_task)
         
