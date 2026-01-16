@@ -942,13 +942,21 @@ def format_broadcast_summary(signal: Signal, results: List[TradeResult], manual_
     error_details = ""
     failed_results = [r for r in results if r.status in (TradeStatus.API_ERROR, TradeStatus.SYMBOL_NOT_FOUND)]
     if failed_results:
+        # Separate SYMBOL_NOT_FOUND from other API errors for cleaner reporting
+        symbol_not_found_count = sum(1 for r in failed_results if r.status == TradeStatus.SYMBOL_NOT_FOUND)
+        api_error_count = sum(1 for r in failed_results if r.status == TradeStatus.API_ERROR)
+        
         error_details = "\n\nErrors:\n"
-        for r in failed_results[:3]:  # Show max 3 errors
-            # Clean the message of any special characters that could break Markdown
-            safe_msg = r.message[:80] if r.message else "Unknown error"
-            safe_msg = safe_msg.replace('*', '').replace('_', '').replace('`', '').replace('[', '(').replace(']', ')')
-            user_id = r.username or str(r.subscriber_id)
-            error_details += f"- {user_id}: {safe_msg}\n"
+        if symbol_not_found_count > 0:
+            error_details += f"❌ Symbol not available: {symbol_not_found_count} subscriber(s)\n"
+        if api_error_count > 0:
+            # Show detailed API errors (max 3) for debugging
+            api_errors = [r for r in failed_results if r.status == TradeStatus.API_ERROR][:3]
+            for r in api_errors:
+                safe_msg = r.message[:80] if r.message else "Unknown error"
+                safe_msg = safe_msg.replace('*', '').replace('_', '').replace('`', '').replace('[', '(').replace(']', ')')
+                user_id = r.username or str(r.subscriber_id)
+                error_details += f"- {user_id}: {safe_msg}\n"
     
     # Use simple formatting to avoid Markdown parse errors
     return f"""📡 Signal Broadcast Complete
