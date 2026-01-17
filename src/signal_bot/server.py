@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     try:
         # Load settings
         settings = get_settings()
-        logger.info(f"Settings loaded - Admin: {settings.admin_telegram_id}")
+        logger.info(f"Settings loaded - Admins: {settings.admin_ids}")
     except Exception as e:
         logger.error(f"Failed to load settings: {e}")
         logger.error("Make sure all required environment variables are set:")

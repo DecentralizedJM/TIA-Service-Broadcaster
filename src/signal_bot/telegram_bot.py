@@ -89,20 +89,29 @@ class SignalBot:
         # Background tasks (store references to prevent garbage collection)
         self._background_tasks: List[asyncio.Task] = []
         
-        logger.info(f"SignalBot initialized - Admin: {settings.admin_telegram_id}")
+        logger.info(f"SignalBot initialized - Admins: {settings.admin_ids}")
     
     def _is_admin(self, user_id: int) -> bool:
-        """Check if user is the admin."""
-        return user_id == self.settings.admin_telegram_id
+        """Check if user is an admin (can be multiple admins)."""
+        return user_id in self.settings.admin_ids
+    
+    def _is_private_chat(self, update: Update) -> bool:
+        """Check if message is from a private/DM chat."""
+        return update.effective_chat and update.effective_chat.type == "private"
     
     def _is_signal_channel(self, chat_id: int) -> bool:
         """Check if message is from the signal channel."""
         return chat_id == self.settings.signal_channel_id
     
     # ==================== User Commands ====================
+    # Note: User commands only work in private DMs, not in groups
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command."""
+        """Handle /start command - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         
         # Check if already registered
@@ -138,7 +147,11 @@ class SignalBot:
             )
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command."""
+        """Handle /status command - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         subscriber = await self.db.get_subscriber(user.id)
         
@@ -169,6 +182,11 @@ class SignalBot:
         """Display help information - different for admins and users."""
         user_id = update.effective_user.id
         is_admin = self._is_admin(user_id)
+        is_private = self._is_private_chat(update)
+        
+        # Non-admins can only use /help in DMs
+        if not is_admin and not is_private:
+            return
         
         if is_admin:
             # Admin Help
@@ -333,7 +351,11 @@ MANUAL Mode: "Execute" button (5 min)
     # ==================== Registration Flow ====================
     
     async def register_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start registration - ask for API key."""
+        """Start registration - ask for API key. Only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return ConversationHandler.END
+        
         if not self.settings.allow_registration:
             await update.message.reply_text(
                 "❌ Registration is currently closed."
@@ -596,7 +618,11 @@ MANUAL Mode: "Execute" button (5 min)
     # ==================== Settings Commands ====================
     
     async def setamount_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /setamount command."""
+        """Handle /setamount command - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         subscriber = await self.db.get_subscriber(user.id)
         
@@ -628,7 +654,11 @@ MANUAL Mode: "Execute" button (5 min)
             await update.message.reply_text("❌ Please enter a valid amount between 1 and 10000")
     
     async def setleverage_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /setleverage command."""
+        """Handle /setleverage command - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         subscriber = await self.db.get_subscriber(user.id)
         
@@ -660,7 +690,11 @@ MANUAL Mode: "Execute" button (5 min)
             await update.message.reply_text("❌ Please enter a valid leverage between 1 and 125")
     
     async def unregister_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /unregister command."""
+        """Handle /unregister command - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         
         success = await self.db.deactivate_subscriber(user.id)
@@ -675,7 +709,11 @@ MANUAL Mode: "Execute" button (5 min)
             await update.message.reply_text("❌ You're not registered.")
     
     async def setmode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /setmode command to switch between AUTO and MANUAL trade modes."""
+        """Handle /setmode command to switch between AUTO and MANUAL trade modes - only in DMs."""
+        # Only respond to DMs, not groups
+        if not self._is_private_chat(update):
+            return
+        
         user = update.effective_user
         subscriber = await self.db.get_subscriber(user.id)
         

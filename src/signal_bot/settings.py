@@ -24,12 +24,16 @@ class Settings(BaseSettings):
         DATABASE_PATH: Path to SQLite database file
         DEFAULT_TRADE_AMOUNT: Default USDT amount for new subscribers
         DEFAULT_MAX_LEVERAGE: Default max leverage for new subscribers
+    
+    Notes:
+        ADMIN_TELEGRAM_IDS: Can be a single ID or comma-separated list
+        e.g., "123456789" or "123456789,987654321,555555555"
     """
     
     # Required
     telegram_bot_token: str = Field(..., env="TELEGRAM_BOT_TOKEN")
     encryption_secret: str = Field(..., env="ENCRYPTION_SECRET", min_length=16)
-    admin_telegram_id: int = Field(..., env="ADMIN_TELEGRAM_ID")
+    admin_telegram_ids: str = Field(..., env="ADMIN_TELEGRAM_ID")  # Can be comma-separated
     signal_channel_id: int = Field(..., env="SIGNAL_CHANNEL_ID")
     
     # Webhook
@@ -55,6 +59,19 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+    
+    @property
+    def admin_ids(self) -> list:
+        """Parse admin_telegram_ids into a list of integers."""
+        ids = []
+        for id_str in self.admin_telegram_ids.split(","):
+            id_str = id_str.strip()
+            if id_str:
+                try:
+                    ids.append(int(id_str))
+                except ValueError:
+                    pass
+        return ids
     
     @property
     def full_webhook_url(self) -> str:

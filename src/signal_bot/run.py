@@ -140,7 +140,7 @@ def main():
         print("\nRun with --generate-secret to create an encryption secret.")
         sys.exit(1)
     
-    logger.info(f"Admin Telegram ID: {settings.admin_telegram_id}")
+    logger.info(f"Admin Telegram IDs: {settings.admin_ids}")
     logger.info(f"Signal Channel ID: {settings.signal_channel_id}")
     logger.info(f"Default Trade Amount: {settings.default_trade_amount} USDT")
     
