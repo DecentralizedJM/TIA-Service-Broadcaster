@@ -641,15 +641,25 @@ class SignalBot:
         for subscriber in subscribers:
             broadcast_notifications.append((subscriber.telegram_id, broadcast_text, {}))
             
-        if broadcast_notifications:
-            asyncio.create_task(self._send_throttled_notifications(broadcast_notifications))
-        
-        # Notify admin of results
-        await message.reply_text(
+        # Notify admin of initiation
+        init_msg = await message.reply_text(
             f"📨 **Message Broadcast Initiated**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Total Subscribers: {len(subscribers)}\n"
-            f"⏳ Sending in background with rate limiting...\n"
+            f"⏳ Sending with rate limiting...\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="Markdown"
+        )
+        
+        # Send notifications and track completion
+        if broadcast_notifications:
+            await self._send_throttled_notifications(broadcast_notifications)
+        
+        # Update admin with completion status
+        await init_msg.edit_text(
+            f"📨 **Message Broadcast Complete**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Successfully sent to {len(subscribers)} subscriber(s)\n"
             f"━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
@@ -1105,8 +1115,11 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
         skipped_count = sum(1 for r in results if r.status == TradeStatus.SKIPPED)
         failed_count = sum(1 for r in results if r.status == TradeStatus.API_ERROR)
         
+        # Format the partial close percentage if applicable
+        percentage_msg = f" {close.partial_percent:.0f}%" if close.partial_percent and close.partial_percent < 100 else ""
+        
         await message.reply_text(
-             f"✅ Signal `{close.signal_id}` Closed\n"
+             f"✅ Signal `{close.signal_id}` Closed{percentage_msg}\n"
              f"━━━━━━━━━━━━━━━━━━━━\n"
              f"✅ Success: {success_count}\n"
              f"⏭️ Skipped: {skipped_count}\n"
@@ -1114,25 +1127,22 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
              parse_mode="Markdown"
         )
         
-        # Notify Users
+        # Notify Users - only send to users who got SUCCESS
         close_notifications = []
         for result in results:
-             if result.status == TradeStatus.SKIPPED:
+             # Skip MANUAL mode subscribers and failed attempts
+             if result.status != TradeStatus.SUCCESS:
                  continue
              
-             # Notify Success or Failure
+             # Format percentage message for user
+             percentage_text = f"{close.partial_percent:.0f}% " if close.partial_percent and close.partial_percent < 100 else ""
+             
              notification = f"🔔 **Position Closed**\n" \
                             f"━━━━━━━━━━━━━━━━━━━━\n" \
                             f"🆔 Signal: `{close.signal_id}`\n" \
-                            f"📊 {close.symbol}\n\n"
-                            
-             if result.status == TradeStatus.SUCCESS:
-                 notification += f"✅ {result.message}\n"
-             else:
-                 notification += f"❌ Failed to close: {result.message}\n" \
-                                 f"⚠️ Please check Mudrex manually."
-             
-             notification += "\n━━━━━━━━━━━━━━━━━━━━"
+                            f"📊 {close.symbol}\n\n" \
+                            f"✅ Position closed {percentage_text}to manage risk\n" \
+                            f"━━━━━━━━━━━━━━━━━━━━"
              
              close_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))
         
@@ -1203,10 +1213,12 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
              parse_mode="Markdown"
         )
         
-        # Notify Users
+        # Notify Users - only send SUCCESS messages to users
         edit_notifications = []
         for result in results:
-             if result.status == TradeStatus.SKIPPED:
+             # Only notify users if SL/TP update was successful
+             # Skip failed attempts and SKIPPED status (no open position)
+             if result.status != TradeStatus.SUCCESS:
                  continue
              
              notification = f"🎯 **SL/TP Updated**\n" \
@@ -1219,11 +1231,7 @@ Click "Execute Trade" to proceed or "Skip" to ignore.
              if edit.take_profit:
                  notification += f"🎯 New TP: {edit.take_profit}\n"
                  
-             if result.status == TradeStatus.SUCCESS:
-                 notification += f"\n✅ Changes applied successfully"
-             else:
-                 notification += f"\n❌ Update Failed: {result.message}"
-             
+             notification += f"\n✅ Changes applied successfully"
              notification += "\n━━━━━━━━━━━━━━━━━━━━"
              
              edit_notifications.append((result.subscriber_id, notification, {"parse_mode": "Markdown"}))

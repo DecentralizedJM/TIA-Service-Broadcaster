@@ -448,21 +448,10 @@ class Database:
         await self._connection.commit()
 
     async def get_active_signals(self) -> List[dict]:
-        """
-        Get all currently active signals that have at least one successful trade.
-        
-        A signal is considered active if:
-        - Status is 'ACTIVE' (not closed)
-        - At least one subscriber successfully executed the trade (SUCCESS or SUCCESS_REDUCED)
-        """
-        async with self._connection.execute("""
-            SELECT DISTINCT s.* 
-            FROM signals s
-            INNER JOIN trade_history t ON s.signal_id = t.signal_id
-            WHERE s.status = 'ACTIVE'
-            AND t.status IN ('SUCCESS', 'SUCCESS_REDUCED')
-            ORDER BY s.created_at DESC
-        """) as cursor:
+        """Get all currently active signals."""
+        async with self._connection.execute(
+            "SELECT * FROM signals WHERE status = 'ACTIVE' ORDER BY created_at DESC"
+        ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
     

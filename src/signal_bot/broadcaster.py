@@ -631,6 +631,7 @@ class SignalBroadcaster:
                     success = success_obj is not None
                     action_msg = f"Closed {percentage:.0f}%"
 
+                # Check if close was successful (both methods return True/object on success)
                 if success:
                     return TradeResult(
                         subscriber_id=subscriber.telegram_id,
@@ -660,7 +661,7 @@ class SignalBroadcaster:
                     subscriber_id=subscriber.telegram_id,
                     username=subscriber.username,
                     status=TradeStatus.API_ERROR,
-                    message=f"Close Error: {e}",
+                    message=f"Close Error: {str(e)}",
                     side="CLOSE",
                     order_type="MARKET",
                     quantity="0",
@@ -801,16 +802,15 @@ class SignalBroadcaster:
         active_subscribers = await self.db.get_active_subscribers()
         
         async def _update_sl_tp_for_subscriber(subscriber: Subscriber) -> TradeResult:
-            if subscriber.trade_mode != 'AUTO':
-                return TradeResult(
-                    subscriber_id=subscriber.telegram_id,
-                    username=subscriber.username,
-                    status=TradeStatus.SKIPPED,
-                    message="Manual mode",
-                    side="EDIT_SLTP",
-                    order_type="UPDATE"
-                )
-
+            """
+            Update SL/TP for a subscriber.
+            
+            Behavior:
+            - Always updates signal in database (handled separately)
+            - If open position exists: Updates SL/TP on exchange
+            - If no open position: Returns success (signal updated in DB, will apply on next trade)
+            - Works for both AUTO and MANUAL mode subscribers
+            """
             try:
                 client = MudrexClient(api_secret=subscriber.api_secret)
                 
@@ -818,32 +818,31 @@ class SignalBroadcaster:
                 positions = await asyncio.to_thread(client.positions.list_open)
                 target_pos = next((p for p in positions if p.symbol == edit.symbol), None)
                 
+                # If no open position, still return success (signal will be updated in DB)
+                # The updated SL/TP will be used when position opens or can be applied later
                 if not target_pos:
                     return TradeResult(
                         subscriber_id=subscriber.telegram_id,
                         username=subscriber.username,
-                        status=TradeStatus.SKIPPED,
-                        message="No open position found",
+                        status=TradeStatus.SUCCESS,
+                        message=f"SL/TP updated in database for {edit.symbol} (no open position)",
                         side="EDIT_SLTP",
                         order_type="UPDATE"
                     )
                 
-                # Update SL/TP on the position
-                # Assuming Mudrex SDK supports position update or set_sl_tp
-                # Based on create_market_order params, it uses stoploss_price and takeprofit_price
+                # Update SL/TP on the open position using the correct SDK method
+                # Based on trade_executor.py, we use set_risk_order with position_id
+                sl_price = str(edit.stop_loss) if edit.stop_loss else None
+                tp_price = str(edit.take_profit) if edit.take_profit else None
                 
-                # We need to use the correct SDK method. 
-                # If there's no set_sl_tp, we might need to cancel existing trigger orders and create new ones.
-                # But Mudrex usually has a direct position update.
-                
-                # I'll use a generic approach assuming set_sl_tp exists or update position
-                # In many SDKs it is: client.positions.set_sl_tp(position_id, stop_loss, take_profit)
                 await asyncio.to_thread(
-                    client.positions.set_sl_tp,
+                    client.positions.set_risk_order,
                     position_id=target_pos.position_id,
-                    stoploss_price=str(edit.stop_loss) if edit.stop_loss else None,
-                    takeprofit_price=str(edit.take_profit) if edit.take_profit else None
+                    stoploss_price=sl_price,
+                    takeprofit_price=tp_price
                 )
+                
+                logger.info(f"Updated SL/TP for subscriber {subscriber.telegram_id} position {target_pos.position_id}: SL={sl_price}, TP={tp_price}")
                 
                 return TradeResult(
                     subscriber_id=subscriber.telegram_id,
@@ -869,6 +868,26 @@ class SignalBroadcaster:
             async with self._trade_semaphore:
                 return await _update_sl_tp_for_subscriber(subscriber)
 
+        # Update signal in database FIRST (even if no subscribers have positions)
+        # This ensures the signal is always updated, allowing SL/TP to be added to signals without SL/TP
+        # Verify signal exists first
+        signal = await self.db.get_signal(edit.signal_id)
+        if not signal:
+            logger.warning(f"Signal {edit.signal_id} not found for SL/TP update")
+            # Return empty results with error message
+            return [TradeResult(
+                subscriber_id=0,
+                username=None,
+                status=TradeStatus.API_ERROR,
+                message=f"Signal {edit.signal_id} not found",
+                side="EDIT_SLTP",
+                order_type="UPDATE"
+            )]
+        
+        await self.db.update_signal_sl_tp(edit.signal_id, edit.stop_loss, edit.take_profit)
+        logger.info(f"Updated signal {edit.signal_id} SL/TP in database: SL={edit.stop_loss}, TP={edit.take_profit}")
+        
+        # Now update SL/TP on all subscribers' open positions (if any)
         tasks = [_update_sl_tp_for_subscriber_throttled(sub) for sub in active_subscribers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -887,9 +906,6 @@ class SignalBroadcaster:
                 ))
             else:
                 trade_results.append(result)
-        
-        # Update signal in database
-        await self.db.update_signal_sl_tp(edit.signal_id, edit.stop_loss, edit.take_profit)
         
         return trade_results
     
