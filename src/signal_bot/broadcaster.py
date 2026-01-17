@@ -601,7 +601,15 @@ class SignalBroadcaster:
                 
                 # Execute Close
                 if percentage == 100:
-                    success = await asyncio.to_thread(client.positions.close, target_pos.position_id)
+                    # Full close - returns True on success
+                    result = await asyncio.to_thread(client.positions.close, target_pos.position_id)
+                    # Handle both boolean and dict responses - check type carefully
+                    if isinstance(result, bool):
+                        success = result
+                    elif isinstance(result, dict):
+                        success = result.get('success', False)
+                    else:
+                        success = result is not None
                     action_msg = "Closed Position"
                 else:
                     # Partial Close
@@ -622,13 +630,20 @@ class SignalBroadcaster:
                     else:
                          close_qty_str = str(close_qty)
 
-                    success_obj = await asyncio.to_thread(
+                    # Partial close returns updated position or order object on success
+                    result = await asyncio.to_thread(
                         client.positions.close_partial, 
                         target_pos.position_id, 
                         close_qty_str
                     )
-                    # Partial close returns updated position or order object on success
-                    success = success_obj is not None
+                    # Handle multiple response types: boolean, object, or None
+                    if isinstance(result, bool):
+                        success = result
+                    elif result is None or result is False:
+                        success = False
+                    else:
+                        # It's an object (position or order)
+                        success = True
                     action_msg = f"Closed {percentage:.0f}%"
 
                 # Check if close was successful (both methods return True/object on success)
@@ -640,7 +655,7 @@ class SignalBroadcaster:
                         message=f"{action_msg}",
                         side="CLOSE",
                         order_type="MARKET",
-                        quantity=target_pos.quantity,
+                        quantity=str(target_pos.quantity),
                         actual_value=0.0
                     )
                 else:
