@@ -231,7 +231,7 @@ TP: 48000
 **Signal Behavior:**
 
 AUTO Mode: Executes instantly
-MANUAL Mode: "Execute" button (10 min)
+MANUAL Mode: "Execute" button (5 min)
 
 **User Notifications:**
 ✅ Success/Low balance/Position exists
@@ -266,7 +266,7 @@ MANUAL Mode: "Execute" button (10 min)
 • `/setmode <AUTO|MANUAL>` - Execution mode
   
   **AUTO:** ⚡ Instant execution
-  **MANUAL:** 👆 "Execute" button (10 min)
+  **MANUAL:** 👆 "Execute" button (5 min)
 
 • `/unregister` - Remove account
 • `/help` - This message
