@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # Required
     telegram_bot_token: str = Field(..., env="TELEGRAM_BOT_TOKEN")
     encryption_secret: str = Field(..., env="ENCRYPTION_SECRET", min_length=16)
-    admin_telegram_ids: str = Field(..., env="ADMIN_TELEGRAM_ID")  # Can be comma-separated
+    admin_telegram_id: str = Field(..., env="ADMIN_TELEGRAM_ID")  # Can be comma-separated
     signal_channel_id: int = Field(..., env="SIGNAL_CHANNEL_ID")
     
     # Webhook
@@ -62,9 +62,9 @@ class Settings(BaseSettings):
     
     @property
     def admin_ids(self) -> list:
-        """Parse admin_telegram_ids into a list of integers."""
+        """Parse admin_telegram_id into a list of integers."""
         ids = []
-        for id_str in self.admin_telegram_ids.split(","):
+        for id_str in self.admin_telegram_id.split(","):
             id_str = id_str.strip()
             if id_str:
                 try:
