@@ -31,11 +31,10 @@ Admin (Telegram) → Broadcaster Bot → SDK Clients (Local)
 - `/broadcast <message>` - Broadcast message to SDK clients
 
 ### API Endpoints (for SDK)
-- `GET /api/signals` - Get all active signals
-- `GET /api/signals/{signal_id}` - Get specific signal
-- `WebSocket /ws` - Real-time signal updates
-- `POST /api/sdk/register` - Register SDK client
-- `POST /api/sdk/heartbeat` - Keep connection alive
+- `POST /api/sdk/register` - Register SDK client (one-time, with optional Telegram ID)
+- `WebSocket /ws` - Real-time signal stream (primary connection)
+- `GET /api/signals` - Get all active signals (admin debugging only)
+- `GET /api/signals/{signal_id}` - Get specific signal (admin debugging only)
 
 ## 📦 Installation
 

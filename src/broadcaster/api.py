@@ -20,14 +20,14 @@ logger = logging.getLogger(__name__)
 # ==================== Request/Response Models ====================
 
 class ClientRegisterRequest(BaseModel):
-    """SDK client registration request."""
+    """
+    SDK client registration request.
+    
+    telegram_id: Optional Telegram ID for admin notifications
+                 (e.g., "Signal executed successfully on your SDK")
+    """
     client_id: str
     telegram_id: Optional[int] = None
-
-
-class HeartbeatRequest(BaseModel):
-    """Client heartbeat request."""
-    client_id: str
 
 
 # ==================== Authentication ====================
@@ -79,7 +79,16 @@ class BroadcasterAPI:
             request: ClientRegisterRequest,
             authenticated: bool = Depends(verify_api_secret)
         ):
-            """Register an SDK client."""
+            """
+            Register an SDK client.
+            
+            Telegram ID is optional but recommended - allows admin to:
+            - Send notifications about signal execution
+            - Debug issues ("Did you receive signal X?")
+            - Monitor SDK health
+            
+            Note: Heartbeat is handled via WebSocket ping/pong automatically.
+            """
             client = SDKClient(
                 client_id=request.client_id,
                 telegram_id=request.telegram_id,
@@ -90,21 +99,12 @@ class BroadcasterAPI:
             
             success = await self.db.register_client(client)
             if success:
-                return {"status": "registered", "client_id": request.client_id}
+                msg = {"status": "registered", "client_id": request.client_id}
+                if request.telegram_id:
+                    msg["telegram_notifications"] = "enabled"
+                return msg
             else:
                 raise HTTPException(status_code=500, detail="Registration failed")
-        
-        @self.app.post("/api/sdk/heartbeat")
-        async def heartbeat(
-            request: HeartbeatRequest,
-            authenticated: bool = Depends(verify_api_secret)
-        ):
-            """Update client heartbeat."""
-            success = await self.db.update_client_heartbeat(request.client_id)
-            if success:
-                return {"status": "ok"}
-            else:
-                raise HTTPException(status_code=404, detail="Client not found")
         
         @self.app.get("/api/signals")
         async def get_signals(
@@ -134,7 +134,15 @@ class BroadcasterAPI:
         
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
-            """WebSocket endpoint for real-time signal updates."""
+            """
+            WebSocket endpoint for real-time signal updates.
+            
+            This is the primary connection for SDK clients. Signals are pushed
+            in real-time as admins broadcast them via Telegram.
+            
+            Heartbeat: Send "ping" to receive "pong" (keeps connection alive)
+            No separate heartbeat endpoint needed!
+            """
             await websocket.accept()
             self.websocket_connections.add(websocket)
             logger.info(f"WebSocket client connected. Total: {len(self.websocket_connections)}")
@@ -142,7 +150,7 @@ class BroadcasterAPI:
             try:
                 # Keep connection alive and handle messages
                 while True:
-                    # Receive messages (for heartbeat/ping-pong)
+                    # Receive messages (for ping/pong heartbeat)
                     data = await websocket.receive_text()
                     
                     if data == "ping":

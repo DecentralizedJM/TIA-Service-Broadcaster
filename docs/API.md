@@ -45,7 +45,7 @@ Register an SDK client.
 ```json
 {
   "client_id": "unique-client-id",
-  "telegram_id": 123456789  // Optional
+  "telegram_id": 123456789  // Optional but recommended for admin notifications
 }
 ```
 
@@ -53,26 +53,14 @@ Register an SDK client.
 ```json
 {
   "status": "registered",
-  "client_id": "unique-client-id"
+  "client_id": "unique-client-id",
+  "telegram_notifications": "enabled"  // If telegram_id provided
 }
 ```
 
-### POST `/api/sdk/heartbeat`
-Update client heartbeat (keep-alive).
+**Note:** Telegram ID enables admin to send notifications about your SDK's signal execution status. Useful for monitoring and debugging!
 
-**Request:**
-```json
-{
-  "client_id": "unique-client-id"
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok"
-}
-```
+**Heartbeat:** No separate heartbeat endpoint needed! WebSocket ping/pong handles this automatically.
 
 ### GET `/api/signals`
 Get signals.
