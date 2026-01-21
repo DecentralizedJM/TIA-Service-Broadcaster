@@ -113,7 +113,7 @@ def main():
     settings = get_settings()
     
     # Create FastAPI app with lifespan
-    from fastapi import FastAPI
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     app = FastAPI(lifespan=lifespan)
     
     # Add webhook route for Telegram
@@ -140,6 +140,67 @@ def main():
     async def health():
         """Health check."""
         return {"status": "healthy"}
+    
+    # WebSocket endpoint for SDK clients
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket, client_id: str = "unknown"):
+        """
+        WebSocket endpoint for real-time signal updates.
+        SDK clients connect here to receive signals.
+        """
+        if not api:
+            await websocket.close(code=1011, reason="Server not ready")
+            return
+        
+        await websocket.accept()
+        api.websocket_connections.add(websocket)
+        api.websocket_clients[websocket] = client_id
+        
+        # Update last heartbeat in database
+        await api.db.update_client_heartbeat(client_id)
+        
+        logger.info(f"WebSocket client connected: {client_id}. Total: {len(api.websocket_connections)}")
+        
+        try:
+            while True:
+                data = await websocket.receive_text()
+                
+                if data == "ping":
+                    await websocket.send_text("pong")
+                    await api.db.update_client_heartbeat(client_id)
+        
+        except WebSocketDisconnect:
+            api.websocket_connections.discard(websocket)
+            api.websocket_clients.pop(websocket, None)
+            logger.info(f"WebSocket client disconnected: {client_id}. Total: {len(api.websocket_connections)}")
+        
+        except Exception as e:
+            logger.error(f"WebSocket error for {client_id}: {e}")
+            if websocket in api.websocket_connections:
+                api.websocket_connections.discard(websocket)
+                api.websocket_clients.pop(websocket, None)
+    
+    # API endpoints for SDK
+    @app.get("/api/signals")
+    async def get_signals(active_only: bool = True, limit: int = 100):
+        """Get signals."""
+        if not api:
+            return {"signals": [], "count": 0}
+        if active_only:
+            signals = await api.db.get_active_signals()
+        else:
+            signals = await api.db.get_all_signals(limit=limit)
+        return {"signals": signals, "count": len(signals)}
+    
+    @app.get("/api/signals/{signal_id}")
+    async def get_signal(signal_id: str):
+        """Get a specific signal."""
+        if not api:
+            return {"error": "Server not ready"}
+        signal = await api.db.get_signal(signal_id)
+        if signal:
+            return {"signal": signal}
+        return {"error": "Signal not found"}
     
     # Start server
     logger.info(f"Starting server on {settings.host}:{settings.port}")
