@@ -92,9 +92,20 @@ async def lifespan(app):
 async def process_update_safely(update_data: dict):
     """Process Telegram update with error handling."""
     try:
+        logger.info(f"Processing webhook update: {update_data.get('update_id', 'unknown')}")
+        
+        # Log message details if present
+        if 'message' in update_data:
+            msg = update_data['message']
+            chat_id = msg.get('chat', {}).get('id', 'unknown')
+            user_id = msg.get('from', {}).get('id', 'unknown')
+            text = msg.get('text', '')[:50] if msg.get('text') else '[no text]'
+            logger.info(f"  Message from user={user_id} in chat={chat_id}: '{text}'")
+        
         from telegram import Update
         update = Update.de_json(update_data, bot.app.bot)
         await bot.app.process_update(update)
+        logger.info(f"  Update processed successfully")
     except Exception as e:
         logger.error(f"Error processing update: {e}", exc_info=True)
 
