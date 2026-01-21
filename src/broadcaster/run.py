@@ -48,7 +48,7 @@ async def lifespan(app):
     except Exception as e:
         logger.error(f"Failed to load settings: {e}")
         logger.error("Make sure all required environment variables are set:")
-        logger.error("  TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, API_SECRET")
+        logger.error("  TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID")
         raise
     
     # Initialize database

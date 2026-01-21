@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     Required:
         TELEGRAM_BOT_TOKEN: Your Telegram bot token from @BotFather
         ADMIN_TELEGRAM_ID: Admin Telegram user ID(s) - comma-separated for multiple
-        API_SECRET: Shared secret for SDK client authentication
     
     Optional:
         DATABASE_PATH: Path to SQLite database file (defaults to broadcaster.db)
@@ -25,7 +24,6 @@ class Settings(BaseSettings):
     # Required
     telegram_bot_token: str = Field(..., env="TELEGRAM_BOT_TOKEN")
     admin_telegram_id: str = Field(..., env="ADMIN_TELEGRAM_ID")  # Comma-separated
-    api_secret: str = Field(..., env="API_SECRET", min_length=16)
     
     # Optional
     database_path: str = Field("broadcaster.db", env="DATABASE_PATH")

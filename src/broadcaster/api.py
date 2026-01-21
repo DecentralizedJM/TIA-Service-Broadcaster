@@ -4,7 +4,7 @@ FastAPI - REST and WebSocket API for SDK clients.
 
 import logging
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Set
@@ -30,17 +30,9 @@ class ClientRegisterRequest(BaseModel):
     telegram_id: Optional[int] = None
 
 
-# ==================== Authentication ====================
-
-async def verify_api_secret(x_api_secret: str = Header(...)):
-    """Verify API secret from SDK client."""
-    settings = get_settings()
-    if x_api_secret != settings.api_secret:
-        raise HTTPException(status_code=401, detail="Invalid API secret")
-    return True
-
-
 # ==================== Broadcaster API ====================
+# Note: This is a PUBLIC service - anyone can connect via SDK
+# No authentication required - signals are broadcast to all connected clients
 
 class BroadcasterAPI:
     """FastAPI app for SDK client connections."""
@@ -76,8 +68,7 @@ class BroadcasterAPI:
         
         @self.app.post("/api/sdk/register")
         async def register_client(
-            request: ClientRegisterRequest,
-            authenticated: bool = Depends(verify_api_secret)
+            request: ClientRegisterRequest
         ):
             """
             Register an SDK client.
@@ -109,8 +100,7 @@ class BroadcasterAPI:
         @self.app.get("/api/signals")
         async def get_signals(
             active_only: bool = True,
-            limit: int = 100,
-            authenticated: bool = Depends(verify_api_secret)
+            limit: int = 100
         ):
             """Get signals (active or all)."""
             if active_only:
@@ -122,8 +112,7 @@ class BroadcasterAPI:
         
         @self.app.get("/api/signals/{signal_id}")
         async def get_signal(
-            signal_id: str,
-            authenticated: bool = Depends(verify_api_secret)
+            signal_id: str
         ):
             """Get a specific signal by ID."""
             signal = await self.db.get_signal(signal_id)
