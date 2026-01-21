@@ -116,22 +116,24 @@ def main():
     from fastapi import FastAPI
     app = FastAPI(lifespan=lifespan)
     
-    # Mount broadcaster API routes
-    @app.on_event("startup")
-    async def startup():
-        global api
-        # Mount the API routes after initialization
-        pass
-    
     # Add webhook route for Telegram
     setup_webhook_route(app)
     
-    # Mount API app routes
+    # Root endpoint
     @app.get("/")
     async def root():
-        """Root endpoint."""
-        if api:
-            return await api.app.routes[0].endpoint()
+        """Root endpoint with service info and stats."""
+        if api and api.db:
+            try:
+                stats = await api.db.get_stats()
+                return {
+                    "service": "TIA Service Broadcaster",
+                    "version": "1.0.0",
+                    "status": "online",
+                    "stats": stats
+                }
+            except Exception:
+                pass
         return {"service": "TIA Service Broadcaster", "status": "starting"}
     
     @app.get("/health")
