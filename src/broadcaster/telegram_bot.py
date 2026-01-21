@@ -67,14 +67,20 @@ class BroadcasterBot:
         """Build the Telegram application with handlers."""
         self.app = Application.builder().token(self.settings.telegram_bot_token).build()
         
-        # Admin commands
+        # Admin commands (standard bot commands)
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CommandHandler("help", self.help_command))
         self.app.add_handler(CommandHandler("stats", self.stats_command))
         self.app.add_handler(CommandHandler("connectedusers", self.connected_users_command))
         self.app.add_handler(CommandHandler("activepositions", self.active_positions_command))
         
-        # Signal parsing - listen to channel messages
+        # Signal commands - these need special handling
+        self.app.add_handler(CommandHandler("signal", self.message_handler))
+        self.app.add_handler(CommandHandler("close", self.message_handler))
+        self.app.add_handler(CommandHandler("editsltp", self.message_handler))
+        self.app.add_handler(CommandHandler("leverage", self.message_handler))
+        
+        # Also handle non-command messages (multi-line signals without /signal prefix)
         self.app.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
@@ -282,7 +288,10 @@ All signals are automatically broadcasted to connected SDK clients!"""
         
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        message_preview = update.message.text[:50].replace('\n', ' ')
+        
+        # Get full message text (for CommandHandler, we need to reconstruct it)
+        message_text = update.message.text.strip()
+        message_preview = message_text[:50].replace('\n', ' ')
         
         # Log ALL incoming messages for debugging
         logger.info(f"Message received - chat_id: {chat_id}, user_id: {user_id}, text: '{message_preview}...'")
