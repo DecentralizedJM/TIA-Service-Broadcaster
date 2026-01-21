@@ -41,6 +41,28 @@ class BroadcasterBot:
         """Check if user is an admin."""
         return user_id in self.settings.admin_ids
     
+    def _is_signal_source(self, update: Update) -> bool:
+        """
+        Check if this message is from a valid signal source.
+        
+        Valid sources:
+        1. Admin DM (direct message from admin)
+        2. Signal channel (if configured)
+        """
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        # Check if from admin DM
+        if self._is_admin(user_id):
+            return True
+        
+        # Check if from signal channel
+        if self.settings.signal_channel_id:
+            if chat_id == self.settings.signal_channel_id:
+                return True
+        
+        return False
+    
     def build_application(self):
         """Build the Telegram application with handlers."""
         self.app = Application.builder().token(self.settings.telegram_bot_token).build()
@@ -77,9 +99,16 @@ class BroadcasterBot:
         if not self._is_admin(update.effective_user.id):
             return
         
+        channel_info = ""
+        if self.settings.signal_channel_id:
+            channel_info = f"\n📡 Signal Channel: `{self.settings.signal_channel_id}`\n"
+        else:
+            channel_info = "\n⚠️ No signal channel configured (set SIGNAL_CHANNEL_ID)\n"
+        
         await update.message.reply_text(
             "🤖 **TIA Service Broadcaster**\n\n"
-            "Signal broadcasting service for Mudrex Trade Ideas.\n\n"
+            "Signal broadcasting service for Mudrex Trade Ideas.\n"
+            f"{channel_info}\n"
             "**Admin Commands:**\n"
             "/help - Command list\n"
             "/stats - System statistics\n"
@@ -251,11 +280,14 @@ All signals are automatically broadcasted to connected SDK clients!"""
         if not update.message or not update.message.text:
             return
         
+        # Check if this is from a valid signal source (admin DM or signal channel)
+        if not self._is_signal_source(update):
+            return
+        
+        chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         
-        # Only admins can broadcast signals
-        if not self._is_admin(user_id):
-            return
+        logger.info(f"Signal check - chat_id: {chat_id}, user_id: {user_id}, is_admin: {self._is_admin(user_id)}")
         
         message_text = update.message.text.strip()
         

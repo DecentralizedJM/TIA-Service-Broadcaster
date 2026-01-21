@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(..., env="TELEGRAM_BOT_TOKEN")
     admin_telegram_id: str = Field(..., env="ADMIN_TELEGRAM_ID")  # Comma-separated
     
+    # Optional - Signal Channel (where admins post signals)
+    signal_channel_id: Optional[int] = Field(None, env="SIGNAL_CHANNEL_ID")
+    
     # Optional
     database_path: str = Field("broadcaster.db", env="DATABASE_PATH")
     webhook_url: Optional[str] = Field(None, env="WEBHOOK_URL")
