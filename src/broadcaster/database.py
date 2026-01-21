@@ -274,6 +274,37 @@ class Database:
             logger.error(f"Failed to record delivery: {e}")
             return False
     
+    async def record_signal_delivery(self, signal_id: str, client_id: str) -> bool:
+        """Record that a signal was delivered to a client."""
+        try:
+            await self._connection.execute("""
+                INSERT INTO signal_delivery (signal_id, client_id, delivered_at, acknowledged)
+                VALUES (?, ?, ?, 0)
+            """, (signal_id, client_id, datetime.utcnow().isoformat()))
+            await self._connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to record signal delivery: {e}")
+            return False
+    
+    async def get_signal_delivery_stats(self, signal_id: str) -> Dict:
+        """Get delivery statistics for a specific signal."""
+        stats = {}
+        
+        async with self._connection.execute(
+            "SELECT COUNT(*) FROM signal_delivery WHERE signal_id = ?", (signal_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            stats["delivered_count"] = row[0]
+        
+        async with self._connection.execute(
+            "SELECT COUNT(*) FROM signal_delivery WHERE signal_id = ? AND acknowledged = 1", (signal_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            stats["acknowledged_count"] = row[0]
+        
+        return stats
+    
     async def get_stats(self) -> Dict:
         """Get broadcaster statistics."""
         stats = {}
@@ -288,6 +319,10 @@ class Database:
             row = await cursor.fetchone()
             stats["active_signals"] = row[0]
         
+        async with self._connection.execute("SELECT COUNT(*) FROM sdk_clients") as cursor:
+            row = await cursor.fetchone()
+            stats["total_clients"] = row[0]
+        
         async with self._connection.execute("SELECT COUNT(*) FROM sdk_clients WHERE active = 1") as cursor:
             row = await cursor.fetchone()
             stats["active_clients"] = row[0]
@@ -295,5 +330,13 @@ class Database:
         async with self._connection.execute("SELECT COUNT(*) FROM signal_delivery") as cursor:
             row = await cursor.fetchone()
             stats["total_deliveries"] = row[0]
+        
+        # Get recent delivery stats (last 24 hours)
+        async with self._connection.execute("""
+            SELECT COUNT(*) FROM signal_delivery 
+            WHERE datetime(delivered_at) > datetime('now', '-1 day')
+        """) as cursor:
+            row = await cursor.fetchone()
+            stats["deliveries_24h"] = row[0]
         
         return stats

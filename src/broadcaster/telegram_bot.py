@@ -49,6 +49,7 @@ class BroadcasterBot:
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CommandHandler("help", self.help_command))
         self.app.add_handler(CommandHandler("stats", self.stats_command))
+        self.app.add_handler(CommandHandler("connectedusers", self.connected_users_command))
         self.app.add_handler(CommandHandler("activepositions", self.active_positions_command))
         
         # Signal parsing - listen to channel messages
@@ -139,20 +140,68 @@ All signals are automatically broadcasted to connected SDK clients!"""
         
         stats = await self.db.get_stats()
         
+        # Get real-time connection count from API
+        live_connections = self.api.get_connection_count()
+        
         stats_text = f"""📊 **Broadcaster Statistics**
 ━━━━━━━━━━━━━━━━━━━━
 
 📡 **Signals:**
-• Total: {stats.get('total_signals', 0)}
-• Active: {stats.get('active_signals', 0)}
-• Delivered: {stats.get('total_deliveries', 0)}
+• Total Sent: {stats.get('total_signals', 0)}
+• Active Positions: {stats.get('active_signals', 0)}
+• Total Deliveries: {stats.get('total_deliveries', 0)}
+• Last 24h: {stats.get('deliveries_24h', 0)} deliveries
 
 👥 **SDK Clients:**
-• Connected: {stats.get('active_clients', 0)}
+• 🟢 **Live Now: {live_connections}**
+• Total Registered: {stats.get('total_clients', 0)}
+• Active in DB: {stats.get('active_clients', 0)}
+
+💡 Use /connectedusers for detailed info
 
 ━━━━━━━━━━━━━━━━━━━━"""
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
+    
+    async def connected_users_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /connectedusers command - show live WebSocket connections."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        # Get live connections from API
+        connected_clients = self.api.get_connected_clients()
+        connection_count = len(connected_clients)
+        
+        if connection_count == 0:
+            await update.message.reply_text(
+                "👥 **Connected Users**\n\n"
+                "No users currently connected.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Get client details from database
+        client_details = []
+        for client_id in connected_clients:
+            client = await self.db.get_client(client_id)
+            if client:
+                telegram_info = f" (TG: {client['telegram_id']})" if client.get('telegram_id') else ""
+                connected_at = client['connected_at'][:16] if client.get('connected_at') else "Unknown"
+                client_details.append(f"• {client_id}{telegram_info}\n  └ Connected: {connected_at}")
+            else:
+                client_details.append(f"• {client_id}\n  └ Not registered")
+        
+        # Split into chunks if too many
+        max_per_message = 20
+        if len(client_details) > max_per_message:
+            response = f"👥 **Connected Users** ({connection_count} total)\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            response += "\n".join(client_details[:max_per_message])
+            response += f"\n\n... and {len(client_details) - max_per_message} more"
+        else:
+            response = f"👥 **Connected Users** ({connection_count})\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            response += "\n".join(client_details)
+        
+        await update.message.reply_text(response, parse_mode="Markdown")
     
     async def active_positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /activepositions command."""

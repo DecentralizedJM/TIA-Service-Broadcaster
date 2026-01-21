@@ -41,6 +41,8 @@ class BroadcasterAPI:
         self.db = database
         self.app = FastAPI(title="TIA Service Broadcaster", version="1.0.0")
         self.websocket_connections: Set[WebSocket] = set()
+        # Track WebSocket connections with client info: websocket -> client_id
+        self.websocket_clients: Dict[WebSocket, str] = {}
         
         # Register routes
         self._register_routes()
@@ -122,19 +124,26 @@ class BroadcasterAPI:
                 raise HTTPException(status_code=404, detail="Signal not found")
         
         @self.app.websocket("/ws")
-        async def websocket_endpoint(websocket: WebSocket):
+        async def websocket_endpoint(websocket: WebSocket, client_id: str = "unknown"):
             """
             WebSocket endpoint for real-time signal updates.
             
             This is the primary connection for SDK clients. Signals are pushed
             in real-time as admins broadcast them via Telegram.
             
+            Query params:
+                client_id: Unique client identifier
+            
             Heartbeat: Send "ping" to receive "pong" (keeps connection alive)
-            No separate heartbeat endpoint needed!
             """
             await websocket.accept()
             self.websocket_connections.add(websocket)
-            logger.info(f"WebSocket client connected. Total: {len(self.websocket_connections)}")
+            self.websocket_clients[websocket] = client_id
+            
+            # Update last heartbeat in database
+            await self.db.update_client_heartbeat(client_id)
+            
+            logger.info(f"WebSocket client connected: {client_id}. Total: {len(self.websocket_connections)}")
             
             try:
                 # Keep connection alive and handle messages
@@ -144,15 +153,19 @@ class BroadcasterAPI:
                     
                     if data == "ping":
                         await websocket.send_text("pong")
+                        # Update heartbeat in database
+                        await self.db.update_client_heartbeat(client_id)
             
             except WebSocketDisconnect:
-                self.websocket_connections.remove(websocket)
-                logger.info(f"WebSocket client disconnected. Total: {len(self.websocket_connections)}")
+                self.websocket_connections.discard(websocket)
+                self.websocket_clients.pop(websocket, None)
+                logger.info(f"WebSocket client disconnected: {client_id}. Total: {len(self.websocket_connections)}")
             
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                logger.error(f"WebSocket error for {client_id}: {e}")
                 if websocket in self.websocket_connections:
-                    self.websocket_connections.remove(websocket)
+                    self.websocket_connections.discard(websocket)
+                    self.websocket_clients.pop(websocket, None)
     
     # ==================== Broadcasting Methods ====================
     
@@ -162,8 +175,9 @@ class BroadcasterAPI:
             "type": "NEW_SIGNAL",
             "signal": signal.to_dict()
         }
-        await self._broadcast_to_websockets(message)
-        logger.info(f"Broadcasted signal to {len(self.websocket_connections)} WebSocket clients")
+        delivered_count = await self._broadcast_to_websockets(message, signal.signal_id)
+        logger.info(f"Broadcasted signal {signal.signal_id} to {delivered_count}/{len(self.websocket_connections)} WebSocket clients")
+        return delivered_count
     
     async def broadcast_close(self, close: SignalClose):
         """Broadcast close command to SDK clients."""
@@ -199,21 +213,46 @@ class BroadcasterAPI:
         await self._broadcast_to_websockets(message)
         logger.info(f"Broadcasted leverage update for {lev.signal_id}")
     
-    async def _broadcast_to_websockets(self, message: dict):
-        """Send message to all connected WebSocket clients."""
+    async def _broadcast_to_websockets(self, message: dict, signal_id: Optional[str] = None) -> int:
+        """
+        Send message to all connected WebSocket clients.
+        
+        Returns:
+            Number of successfully delivered messages
+        """
         if not self.websocket_connections:
             logger.debug("No WebSocket clients connected")
-            return
+            return 0
         
         disconnected = set()
+        delivered_count = 0
         
         for websocket in self.websocket_connections:
             try:
                 await websocket.send_json(message)
+                delivered_count += 1
+                
+                # Track delivery in database if signal_id provided
+                if signal_id and websocket in self.websocket_clients:
+                    client_id = self.websocket_clients[websocket]
+                    await self.db.record_signal_delivery(signal_id, client_id)
+                    
             except Exception as e:
-                logger.error(f"Failed to send to WebSocket client: {e}")
+                client_id = self.websocket_clients.get(websocket, "unknown")
+                logger.error(f"Failed to send to WebSocket client {client_id}: {e}")
                 disconnected.add(websocket)
         
         # Remove disconnected clients
         for ws in disconnected:
             self.websocket_connections.discard(ws)
+            self.websocket_clients.pop(ws, None)
+        
+        return delivered_count
+    
+    def get_connected_clients(self) -> List[str]:
+        """Get list of currently connected client IDs."""
+        return list(self.websocket_clients.values())
+    
+    def get_connection_count(self) -> int:
+        """Get current WebSocket connection count."""
+        return len(self.websocket_connections)
