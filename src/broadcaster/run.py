@@ -52,8 +52,8 @@ async def lifespan(app):
         raise
     
     # Initialize database
-    db_path = settings.database_url.replace("sqlite:///", "")
-    database = Database(db_path)
+    database = Database(settings.database_path)
+    logger.info(f"Database path: {settings.database_path}")
     await database.connect()
     
     # Initialize API

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         API_SECRET: Shared secret for SDK client authentication
     
     Optional:
-        DATABASE_URL: Database connection string (defaults to SQLite)
+        DATABASE_PATH: Path to SQLite database file (defaults to broadcaster.db)
         WEBHOOK_URL: Public URL for Telegram webhook (Railway provides this)
         PORT: Server port (Railway sets this dynamically)
     """
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     api_secret: str = Field(..., env="API_SECRET", min_length=16)
     
     # Optional
-    database_url: str = Field("sqlite:///signals.db", env="DATABASE_URL")
+    database_path: str = Field("broadcaster.db", env="DATABASE_PATH")
     webhook_url: Optional[str] = Field(None, env="WEBHOOK_URL")
     webhook_path: str = Field("/webhook", env="WEBHOOK_PATH")
     
