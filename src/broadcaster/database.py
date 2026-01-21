@@ -235,6 +235,14 @@ class Database:
             logger.error(f"Failed to update client heartbeat: {e}")
             return False
     
+    async def get_client(self, client_id: str) -> Optional[Dict]:
+        """Get a specific SDK client by ID."""
+        async with self._connection.execute(
+            "SELECT * FROM sdk_clients WHERE client_id = ?", (client_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+    
     async def get_active_clients(self) -> List[Dict]:
         """Get all active SDK clients."""
         async with self._connection.execute(
