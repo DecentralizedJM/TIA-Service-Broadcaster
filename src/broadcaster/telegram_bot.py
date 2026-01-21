@@ -280,20 +280,32 @@ All signals are automatically broadcasted to connected SDK clients!"""
         if not update.message or not update.message.text:
             return
         
-        # Check if this is from a valid signal source (admin DM or signal channel)
-        if not self._is_signal_source(update):
-            return
-        
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
+        message_preview = update.message.text[:50].replace('\n', ' ')
         
-        logger.info(f"Signal check - chat_id: {chat_id}, user_id: {user_id}, is_admin: {self._is_admin(user_id)}")
+        # Log ALL incoming messages for debugging
+        logger.info(f"Message received - chat_id: {chat_id}, user_id: {user_id}, text: '{message_preview}...'")
+        logger.info(f"  -> is_admin: {self._is_admin(user_id)}, signal_channel: {self.settings.signal_channel_id}")
+        
+        # Check if this is from a valid signal source (admin DM or signal channel)
+        if not self._is_signal_source(update):
+            logger.info(f"  -> IGNORED (not from admin or signal channel)")
+            return
+        
+        logger.info(f"  -> ACCEPTED for processing")
         
         message_text = update.message.text.strip()
         
         # Parse signal command
         try:
             parsed = SignalParser.parse(message_text)
+            
+            if parsed is None:
+                logger.info(f"  -> No valid signal format detected")
+                return
+            
+            logger.info(f"  -> Parsed as: {type(parsed).__name__}")
             
             if isinstance(parsed, Signal):
                 await self._handle_new_signal(update, parsed)
