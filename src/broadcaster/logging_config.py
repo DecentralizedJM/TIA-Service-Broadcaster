@@ -86,20 +86,25 @@ class SecurityFilter(logging.Filter):
 
 def setup_secure_logging():
     """Set up logging with security filters."""
-    # Get root logger
-    root_logger = logging.getLogger()
-    
-    # Add security filter to root logger
+    # Create security filter instance
     security_filter = SecurityFilter()
+    
+    # Get root logger and add filter
+    root_logger = logging.getLogger()
     root_logger.addFilter(security_filter)
     
-    # Suppress verbose HTTP logging from httpx and httpcore
+    # Suppress verbose HTTP logging from httpx and httpcore (these log full URLs with tokens)
     logging.getLogger('httpx').setLevel(logging.WARNING)
     logging.getLogger('httpcore').setLevel(logging.WARNING)
     logging.getLogger('telegram').setLevel(logging.WARNING)
+    logging.getLogger('telegram.ext').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.WARNING)  # Suppress access logs
     
-    # Also add filter to these loggers
-    for logger_name in ['httpx', 'httpcore', 'telegram', 'telegram.ext']:
+    # Also add filter to these loggers to catch any remaining logs
+    for logger_name in ['httpx', 'httpcore', 'telegram', 'telegram.ext', 'uvicorn', 'uvicorn.access']:
         logger = logging.getLogger(logger_name)
         logger.addFilter(security_filter)
-        logger.setLevel(logging.WARNING)
+    
+    # Ensure all handlers use the filter
+    for handler in root_logger.handlers:
+        handler.addFilter(security_filter)

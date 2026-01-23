@@ -219,11 +219,16 @@ def main():
     # Start server
     logger.info(f"Starting server on {settings.host}:{settings.port}")
     
+    # Configure uvicorn logging to use security filter
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.setLevel(logging.WARNING)  # Suppress access logs that might contain tokens
+    
     uvicorn.run(
         app,
         host=settings.host,
         port=settings.port,
-        log_level="info"
+        log_level="info",
+        access_log=False  # Disable access logs to prevent token exposure
     )
 
 
