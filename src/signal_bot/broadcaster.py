@@ -13,7 +13,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from mudrex import MudrexClient
 from mudrex.exceptions import MudrexAPIError
@@ -54,6 +54,8 @@ class TradeResult:
     entry_price: Optional[float] = None
     # For insufficient balance flow
     available_balance: Optional[float] = None
+    # For tracking original margin used (for smart close logic)
+    original_margin: Optional[float] = None
 
 
 def escape_markdown(text: str) -> str:
@@ -86,6 +88,9 @@ class SignalBroadcaster:
         self.db = database
         # Semaphore to limit concurrent API operations
         self._trade_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_TRADES)
+        # Asset cache: symbol -> asset (with TTL consideration)
+        # Cache is per-broadcaster instance, cleared on restart
+        self._asset_cache: Dict[str, any] = {}
     
     async def broadcast_signal(self, signal: Signal) -> Tuple[List[TradeResult], List[Subscriber]]:
         """
@@ -200,6 +205,7 @@ class SignalBroadcaster:
             quantity=float(result.quantity) if result.quantity else None,
             entry_price=result.entry_price,
             error_message=result.message if result.status != TradeStatus.SUCCESS else None,
+            original_margin=result.original_margin,
         )
         
         return result
@@ -232,6 +238,43 @@ class SignalBroadcaster:
         except Exception as e:
             logger.warning(f"Price rounding failed for {price} (step {price_step}): {e}")
             return price
+    
+    def _round_quantity_to_step(self, quantity: float, qty_step: Optional[float]) -> str:
+        """
+        Round quantity to match the asset's quantity step and return as string.
+        Extracted helper method to avoid code duplication.
+        """
+        if qty_step is None or qty_step <= 0:
+            return str(quantity)
+        
+        try:
+            rounded_qty = round(quantity / qty_step) * qty_step
+            import math
+            if qty_step < 1:
+                precision = int(abs(math.log10(qty_step)))
+            else:
+                precision = 0
+            return f"{rounded_qty:.{precision}f}"
+        except Exception as e:
+            logger.warning(f"Quantity rounding failed for {quantity} (step {qty_step}): {e}")
+            return str(quantity)
+    
+    async def _get_cached_asset(self, client: MudrexClient, symbol: str) -> Optional[any]:  # type: ignore
+        """
+        Get asset info with caching to reduce API calls.
+        Cache is per-instance and cleared on restart.
+        """
+        if symbol in self._asset_cache:
+            return self._asset_cache[symbol]
+        
+        try:
+            asset = await asyncio.to_thread(client.assets.get, symbol)
+            if asset:
+                self._asset_cache[symbol] = asset
+            return asset
+        except Exception as e:
+            logger.error(f"Failed to get asset {symbol}: {e}")
+            return None
 
     def _execute_trade_sync(
         self,
@@ -297,9 +340,11 @@ class SignalBroadcaster:
                 target_margin = balance
                 used_reduced_balance = True
             
-            # Get asset details early
+            # Get asset details early (use cached version if available)
             logger.info(f"Getting asset info for {signal.symbol}...")
             try:
+                # Note: _get_cached_asset is async, but we're in sync context
+                # So we'll get asset directly here and cache will be used in async methods
                 asset = client.assets.get(signal.symbol)
                 if not asset:
                     raise ValueError(f"Asset returned None for {signal.symbol}")
@@ -443,13 +488,18 @@ class SignalBroadcaster:
             
             logger.info(f"Order created: {order.order_id if order else 'None'}")
             
-            # Determine status and message based on whether we used reduced balance
+            # Determine status and message based on whether actual executed value is less than configured
+            # Compare actual_value (notional executed) vs configured_notional (target notional)
+            configured_notional = subscriber.trade_amount_usdt * leverage
+            tolerance = max(0.50, configured_notional * 0.01)  # 1% or minimum $0.50 tolerance
+            used_reduced_balance = actual_value < (configured_notional - tolerance)
+            
             if used_reduced_balance:
                 status = TradeStatus.SUCCESS_REDUCED
                 msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
                 if sl_param or tp_param:
                     msg += " | SL/TP set"
-                msg += f"\n⚠️ Trade executed with available amount. Please add funds to your futures wallet."
+                msg += f"\n⚠️ Trade Executed (Reduced Amount). Please add funds to your futures wallet."
             else:
                 status = TradeStatus.SUCCESS
                 msg = f"{side} {qty_str} {signal.symbol} (~${actual_value:.2f})"
@@ -468,6 +518,7 @@ class SignalBroadcaster:
                 order_type=signal.order_type.value,
                 entry_price=signal.entry_price,
                 available_balance=balance if used_reduced_balance else None,
+                original_margin=target_margin,  # Store the actual margin used
             )
             
         except MudrexAPIError as e:
@@ -557,10 +608,19 @@ class SignalBroadcaster:
         Broadcast a close signal to all subscribers.
         
         Fetches open positions for each subscriber and closes them if they match the signal symbol.
+        Only closes positions for users who actually executed the original signal.
         """
         logger.info(f"Broadcasting close for signal {close.signal_id}")
         
-        active_subscribers = await self.db.get_active_subscribers()
+        # Get list of users who actually executed this signal
+        executed_user_ids = await self.db.get_users_who_executed_signal(close.signal_id)
+        logger.info(f"Found {len(executed_user_ids)} users who executed signal {close.signal_id}")
+        
+        # Get all active subscribers, but filter to only those who executed
+        all_subscribers = await self.db.get_active_subscribers()
+        active_subscribers = [s for s in all_subscribers if s.telegram_id in executed_user_ids]
+        
+        logger.info(f"Filtered to {len(active_subscribers)} subscribers who executed the signal (out of {len(all_subscribers)} total)")
         
         async def _close_for_subscriber(subscriber: Subscriber) -> TradeResult:
             if subscriber.trade_mode != 'AUTO':
@@ -582,7 +642,10 @@ class SignalBroadcaster:
                 positions = await asyncio.to_thread(client.positions.list_open)
                 
                 # Find position for this symbol
-                target_pos = next((p for p in positions if p.symbol == close.symbol), None)
+                matching_positions = [p for p in positions if p.symbol == close.symbol]
+                if len(matching_positions) > 1:
+                    logger.warning(f"User {subscriber.telegram_id} has {len(matching_positions)} positions for {close.symbol}, using first one")
+                target_pos = matching_positions[0] if matching_positions else None
                 
                 if not target_pos:
                     return TradeResult(
@@ -596,12 +659,99 @@ class SignalBroadcaster:
                         actual_value=0.0
                     )
                 
+                # Get trade info from database to determine original margin/quantity
+                try:
+                    trade_info = await self.db.get_trade_info_for_signal(close.signal_id, subscriber.telegram_id)
+                    original_margin = trade_info.get('original_margin') if trade_info else None
+                    original_quantity = trade_info.get('original_quantity') if trade_info else None
+                    # Get original leverage from signal
+                    signal_data = await self.db.get_signal(close.signal_id)
+                    original_leverage = float(signal_data.get('leverage', 1)) if signal_data else None
+                except Exception as db_error:
+                    logger.error(f"Error fetching trade info for {subscriber.telegram_id}: {db_error}")
+                    trade_info = None
+                    original_margin = None
+                    original_quantity = None
+                    original_leverage = None
+                
                 # Determine percentage
                 percentage = close.partial_percent if close.partial_percent is not None else 100.0
                 
+                # Smart close logic: Calculate close_qty based on original margin
+                close_qty = None
+                if original_margin and original_quantity and original_leverage and percentage == 100.0:
+                    # User may have modified position - calculate smart close
+                    try:
+                        asset = await self._get_cached_asset(client, close.symbol)
+                        qty_step = float(asset.quantity_step) if asset and asset.quantity_step else None
+                        
+                        current_qty = float(target_pos.quantity)
+                        original_qty_float = float(original_quantity)
+                        
+                        # Calculate original notional value
+                        original_notional = original_margin * original_leverage
+                        # Calculate current notional (approximate using current price)
+                        current_price = float(target_pos.entry_price) if hasattr(target_pos, 'entry_price') else None
+                        if current_price:
+                            current_notional = current_price * current_qty
+                            original_notional_at_current = current_price * original_qty_float
+                        else:
+                            # Fallback: use quantity comparison
+                            current_notional = None
+                            original_notional_at_current = None
+                        
+                        # Smart close logic:
+                        # 1. If position increased (current_qty > original_qty), close only original_qty
+                        # 2. If position reduced (current_qty < original_qty), close full current position
+                        # 3. Otherwise, close full current position
+                        if current_qty > original_qty_float:
+                            # Position was increased - close only original amount
+                            close_qty = original_qty_float
+                            logger.info(f"Position increased: {current_qty} > {original_qty_float}, closing only {close_qty}")
+                        elif current_qty < original_qty_float:
+                            # Position was reduced - close full current position
+                            close_qty = current_qty
+                            logger.info(f"Position reduced: {current_qty} < {original_qty_float}, closing full {close_qty}")
+                        else:
+                            # Position unchanged - close full
+                            close_qty = current_qty
+                            logger.info(f"Position unchanged: {current_qty}, closing full")
+                        
+                        # Round to quantity step
+                        if close_qty:
+                            close_qty_str = self._round_quantity_to_step(close_qty, qty_step)
+                        else:
+                            close_qty_str = None
+                    except Exception as calc_error:
+                        logger.error(f"Error calculating smart close for {subscriber.telegram_id}: {calc_error}")
+                        close_qty = None
+                        close_qty_str = None
+                else:
+                    # No original_margin (pre-migration trade) or partial close - use normal logic
+                    if trade_info and original_margin is None:
+                        logger.debug(f"Trade {close.signal_id} for user {subscriber.telegram_id} has no original_margin (pre-migration trade), using normal close")
+                    close_qty = None
+                    close_qty_str = None
+                
                 # Execute Close
                 try:
-                    if percentage == 100:
+                    # Use smart close_qty if calculated, otherwise use normal logic
+                    if close_qty_str and percentage == 100.0:
+                        # Smart close: close only the calculated amount (original margin)
+                        result = await asyncio.to_thread(
+                            client.positions.close_partial,
+                            target_pos.position_id,
+                            close_qty_str
+                        )
+                        logger.info(f"Smart close_partial result type: {type(result)}, value: {result}")
+                        if isinstance(result, bool):
+                            success = result
+                        elif result is None or result is False:
+                            success = False
+                        else:
+                            success = True
+                        action_msg = f"Closed original position ({close_qty_str})"
+                    elif percentage == 100:
                         # Full close - returns True on success
                         result = await asyncio.to_thread(client.positions.close, target_pos.position_id)
                         logger.info(f"Close result type: {type(result)}, value: {result}")
@@ -614,23 +764,14 @@ class SignalBroadcaster:
                             success = result is not None
                         action_msg = "Closed Position"
                     else:
-                        # Partial Close
-                        asset = await asyncio.to_thread(client.assets.get, close.symbol)
+                        # Partial Close (percentage-based)
+                        asset = await self._get_cached_asset(client, close.symbol)
                         qty_step = float(asset.quantity_step) if asset and asset.quantity_step else None
                         
                         current_qty = float(target_pos.quantity)
                         close_qty = current_qty * (percentage / 100.0)
                         
-                        if qty_step:
-                             close_qty = round(close_qty / qty_step) * qty_step
-                             import math
-                             if qty_step < 1:
-                                precision = int(abs(math.log10(qty_step))) 
-                             else:
-                                precision = 0 
-                             close_qty_str = f"{close_qty:.{precision}f}"
-                        else:
-                             close_qty_str = str(close_qty)
+                        close_qty_str = self._round_quantity_to_step(close_qty, qty_step)
 
                         # Partial close returns updated position or order object on success
                         result = await asyncio.to_thread(
@@ -725,7 +866,7 @@ class SignalBroadcaster:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Filter out exceptions and convert to TradeResult
-        trade_results = []
+        trade_results: List[TradeResult] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"Close failed for subscriber {active_subscribers[i].telegram_id}: {result}")
@@ -742,7 +883,7 @@ class SignalBroadcaster:
         
         await self.db.close_signal(close.signal_id)
         
-        return results
+        return trade_results
     
     async def broadcast_leverage(self, lev: SignalLeverage) -> List[TradeResult]:
         """

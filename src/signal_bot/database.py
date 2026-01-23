@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from .crypto import encrypt, decrypt, CryptoError
 
@@ -99,6 +99,7 @@ class Database:
                 status TEXT NOT NULL,
                 error_message TEXT,
                 executed_at TEXT NOT NULL,
+                original_margin REAL,
                 FOREIGN KEY (telegram_id) REFERENCES subscribers(telegram_id)
             );
             
@@ -147,6 +148,16 @@ class Database:
             logger.info(f"Migration: Fixed {result.rowcount} subscribers with NULL trade_mode")
         
         await self._connection.commit()
+        
+        # Migration: Add original_margin column to trade_history if it doesn't exist
+        try:
+            await self._connection.execute("SELECT original_margin FROM trade_history LIMIT 1")
+        except aiosqlite.OperationalError:
+            # Column doesn't exist, add it
+            logger.info("Adding original_margin column to trade_history table")
+            await self._connection.execute("ALTER TABLE trade_history ADD COLUMN original_margin REAL")
+            await self._connection.commit()
+            logger.info("Migration: Added original_margin column to trade_history")
     
     async def add_subscriber(
         self,
@@ -351,6 +362,7 @@ class Database:
         quantity: Optional[float] = None,
         entry_price: Optional[float] = None,
         error_message: Optional[str] = None,
+        original_margin: Optional[float] = None,
     ):
         """Record a trade execution."""
         now = datetime.now().isoformat()
@@ -358,11 +370,11 @@ class Database:
         await self._connection.execute("""
             INSERT INTO trade_history (
                 telegram_id, signal_id, symbol, side, order_type,
-                quantity, entry_price, status, error_message, executed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                quantity, entry_price, status, error_message, executed_at, original_margin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             telegram_id, signal_id, symbol, side, order_type,
-            quantity, entry_price, status, error_message, now
+            quantity, entry_price, status, error_message, now, original_margin
         ))
         
         # Update subscriber stats
@@ -497,3 +509,39 @@ class Database:
             "active_signals": active_signals_row["count"] or 0,
             "total_signals": total_signals_row["count"] or 0,
         }
+    
+    async def get_users_who_executed_signal(self, signal_id: str) -> List[int]:
+        """
+        Get list of telegram_ids who successfully executed a given signal.
+        Used to filter subscribers when closing positions - only close for users who actually took the signal.
+        """
+        cursor = await self._connection.execute("""
+            SELECT DISTINCT telegram_id 
+            FROM trade_history 
+            WHERE signal_id = ? AND status IN ('SUCCESS', 'SUCCESS_REDUCED')
+        """, (signal_id,))
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+    
+    async def get_trade_info_for_signal(
+        self, signal_id: str, telegram_id: int
+    ) -> Optional[Dict]:
+        """
+        Get trade information for a specific signal and user.
+        Returns dictionary with original_margin, quantity, leverage, etc., or None if not found.
+        """
+        cursor = await self._connection.execute("""
+            SELECT original_margin, quantity, entry_price
+            FROM trade_history
+            WHERE signal_id = ? AND telegram_id = ? AND status IN ('SUCCESS', 'SUCCESS_REDUCED')
+            ORDER BY executed_at DESC
+            LIMIT 1
+        """, (signal_id, telegram_id))
+        row = await cursor.fetchone()
+        if row:
+            return {
+                'original_margin': row[0],
+                'original_quantity': row[1],
+                'entry_price': row[2],
+            }
+        return None
