@@ -15,7 +15,10 @@ from .database import Database
 from .api import BroadcasterAPI
 from .telegram_bot import BroadcasterBot
 
-# Configure logging
+# Configure logging with security filters
+from .logging_config import setup_secure_logging
+setup_secure_logging()
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
