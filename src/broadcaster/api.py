@@ -180,15 +180,31 @@ class BroadcasterAPI:
         return delivered_count
     
     async def broadcast_close(self, close: SignalClose):
-        """Broadcast close command to SDK clients."""
+        """
+        Broadcast close command to SDK clients.
+        
+        Only sends to clients who actually received the original signal.
+        This prevents closing positions for clients who skipped or didn't receive the signal.
+        """
+        # Get list of clients who received the original signal
+        received_client_ids = await self.db.get_clients_who_received_signal(close.signal_id)
+        logger.info(f"Found {len(received_client_ids)} clients who received signal {close.signal_id}")
+        
+        if not received_client_ids:
+            logger.warning(f"No clients received signal {close.signal_id}, skipping close broadcast")
+            return 0
+        
         message = {
             "type": "CLOSE_SIGNAL",
             "signal_id": close.signal_id,
             "symbol": close.symbol,
             "percentage": close.percentage
         }
-        await self._broadcast_to_websockets(message)
-        logger.info(f"Broadcasted close for {close.signal_id}")
+        
+        # Only send to clients who received the original signal
+        delivered_count = await self._broadcast_to_websockets_filtered(message, received_client_ids)
+        logger.info(f"Broadcasted close for {close.signal_id} to {delivered_count}/{len(received_client_ids)} clients who received the signal")
+        return delivered_count
     
     async def broadcast_edit_sl_tp(self, edit: SignalEditSLTP):
         """Broadcast SL/TP update to SDK clients."""
@@ -239,6 +255,50 @@ class BroadcasterAPI:
                     
             except Exception as e:
                 client_id = self.websocket_clients.get(websocket, "unknown")
+                logger.error(f"Failed to send to WebSocket client {client_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Remove disconnected clients
+        for ws in disconnected:
+            self.websocket_connections.discard(ws)
+            self.websocket_clients.pop(ws, None)
+        
+        return delivered_count
+    
+    async def _broadcast_to_websockets_filtered(self, message: dict, allowed_client_ids: List[str]) -> int:
+        """
+        Send message to WebSocket clients, but only to those in the allowed_client_ids list.
+        
+        Args:
+            message: Message to send
+            allowed_client_ids: List of client_ids that should receive this message
+            
+        Returns:
+            Number of successfully delivered messages
+        """
+        if not self.websocket_connections:
+            logger.debug("No WebSocket clients connected")
+            return 0
+        
+        if not allowed_client_ids:
+            logger.debug("No allowed client IDs, skipping broadcast")
+            return 0
+        
+        disconnected = set()
+        delivered_count = 0
+        allowed_set = set(allowed_client_ids)
+        
+        for websocket in self.websocket_connections:
+            client_id = self.websocket_clients.get(websocket)
+            
+            # Only send to clients in the allowed list
+            if client_id not in allowed_set:
+                continue
+            
+            try:
+                await websocket.send_json(message)
+                delivered_count += 1
+            except Exception as e:
                 logger.error(f"Failed to send to WebSocket client {client_id}: {e}")
                 disconnected.add(websocket)
         

@@ -348,3 +348,25 @@ class Database:
             stats["deliveries_24h"] = row[0]
         
         return stats
+    
+    async def get_clients_who_received_signal(self, signal_id: str) -> List[str]:
+        """
+        Get list of client_ids who received (delivered) a given signal.
+        Used to filter clients when closing positions - only close for clients who actually received the signal.
+        """
+        async with self._connection.execute(
+            "SELECT DISTINCT client_id FROM signal_delivery WHERE signal_id = ?", (signal_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+    
+    async def get_clients_who_acknowledged_signal(self, signal_id: str) -> List[str]:
+        """
+        Get list of client_ids who acknowledged a given signal.
+        More strict than received - only clients who confirmed they got and processed the signal.
+        """
+        async with self._connection.execute(
+            "SELECT DISTINCT client_id FROM signal_delivery WHERE signal_id = ? AND acknowledged = 1", (signal_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
